@@ -148,7 +148,7 @@ Plugin options, set through `/config`:
   round trip per host every `poll_interval_s`, and a monitor in interactive sessions.
 - **Local files:** `$XDG_RUNTIME_DIR/remote-ssh/` (`$TMPDIR/rssh` on macOS, `/tmp/remote-ssh-<uid>`
   as fallback) holds state, `server.log`, sockets and mountpoints. `~/.claude/remote-ssh/` holds
-  `machine-id`, `sessions/`, `inbox/`, `outbox/` and `autoconnect.json`.
+  `machine-id.<hostname>`, `sessions/`, `inbox/`, `outbox/` and `autoconnect.json`.
 - **On each connected host:** `~/.claude/remote-ssh/sessions/<sid>.json` with the local hostname, working
   directory, Claude pid, session id, session name and machine id, plus messages in `inbox/` and
   `outbox/`.

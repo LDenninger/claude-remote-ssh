@@ -7,7 +7,7 @@ to, over your own SSH configuration. The maintainer receives nothing.
 
 - `$XDG_RUNTIME_DIR/remote-ssh/` (`$TMPDIR/rssh` on macOS, `/tmp/remote-ssh-<uid>` as fallback):
   connection state, `server.log`, SSH sockets and sshfs mountpoints.
-- `~/.claude/remote-ssh/`: `machine-id`, `sessions/`, `inbox/`, `outbox/` and `autoconnect.json`.
+- `~/.claude/remote-ssh/`: `machine-id.<hostname>`, `sessions/`, `inbox/`, `outbox/` and `autoconnect.json`.
 
 ## What is written on connected hosts
 

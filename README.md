@@ -1,6 +1,6 @@
 # claude-remote-ssh
 
-[![CI](https://github.com/LDenninger/remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/remote-ssh/actions/workflows/ci.yml)
+[![CI](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -40,14 +40,14 @@ running there. Every connection, mount and registration ends with the session.
 ## 📦 Install
 
 ```bash
-claude plugin marketplace add LDenninger/remote-ssh
+claude plugin marketplace add LDenninger/claude-remote-ssh
 claude plugin install remote-ssh@remote-ssh
 ```
 
 To load a local checkout for development:
 
 ```bash
-git clone https://github.com/LDenninger/remote-ssh.git
+git clone https://github.com/LDenninger/claude-remote-ssh.git
 claude --plugin-dir ./remote-ssh
 ```
 
@@ -138,7 +138,7 @@ Plugin options are set when the plugin is enabled, and later through `/config`:
 
 ## 🤝 Contributing
 
-Questions and bug reports go to [GitHub issues](https://github.com/LDenninger/remote-ssh/issues),
+Questions and bug reports go to [GitHub issues](https://github.com/LDenninger/claude-remote-ssh/issues),
 and pull requests are welcome. CI runs `claude plugin validate . --strict`, the unit tests on Ubuntu
 and macOS with Python 3.9 and 3.12, and the integration tests against a local sshd on Ubuntu.
 

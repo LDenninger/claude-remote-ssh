@@ -6,8 +6,8 @@
     "name": "Luis Denninger",
     "url": "https://github.com/LDenninger"
   },
-  "homepage": "https://github.com/LDenninger/remote-ssh",
-  "repository": "https://github.com/LDenninger/remote-ssh",
+  "homepage": "https://github.com/LDenninger/claude-remote-ssh",
+  "repository": "https://github.com/LDenninger/claude-remote-ssh",
   "license": "MIT",
   "keywords": ["ssh", "remote", "sshfs", "mount", "memory", "messaging", "hpc", "gpu"],
   "userConfig": {

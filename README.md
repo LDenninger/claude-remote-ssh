@@ -25,7 +25,6 @@ terminal. The same connection runs commands, edits files and loads project memor
 
 <img src="assets/demo.gif" alt="A laptop session asks a session on a GPU server for its training status and gets the reply in its conversation, then has it resume training." width="100%">
 
-<sub>The plugin lines in this recording are real output. The Claude Code sessions around them are re-enacted.</sub>
 
 ## ✨ Features
 

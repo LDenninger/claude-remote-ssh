@@ -198,6 +198,9 @@ def test_session_end_with_frozen_host_releases_everything_within_10s(session: An
     try:
         started = time.monotonic()
         run_hook(sess.env, 'SessionEnd', {'session_id': sess.sid, 'reason': 'other'})
+        hook_s = time.monotonic() - started
+        assert hook_s < 1.5, 'SessionEnd must return within the hook budget'
+        assert wait_for(lambda: not sess.rt.joinpath('shutdown').exists(), TEARDOWN_LIMIT_S)
         elapsed = time.monotonic() - started
         print(f'\nSessionEnd with a frozen host took {elapsed:.2f} s')
         assert elapsed < TEARDOWN_LIMIT_S

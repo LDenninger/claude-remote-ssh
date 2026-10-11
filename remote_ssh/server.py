@@ -39,6 +39,8 @@ SSH_ERROR_EXIT = 255
 POLL_PULL_TIMEOUT_S = 5.0
 TEARDOWN_MESSAGING_TIMEOUT_S = 3.0
 TEARDOWN_LOCK_WAIT_S = 2.0
+MEMORY_READ_TIMEOUT_S = 3.0
+MEMORY_INDEX_MAX_BYTES = 100_000
 
 
 #---------------------------------------------------------------------
@@ -274,6 +276,7 @@ class HostSession:
         self.master = Master(alias, host, runtime.ctl_path(alias), config.ssh_opts)
         self.fs_dir = runtime.fs_path(alias)
         self.mem_dir = runtime.mem_path(alias)
+        self.runtime_dir = runtime.dir
         self.status = 'connecting'
         self.abs_path: str | None = None
         self.slug: str | None = None
@@ -407,14 +410,30 @@ class HostSession:
         }
 
     def memory_block(self) -> str:
-        """Return the remote memory block, with links rewritten to the memory mount."""
-        if not self.mounted_mem:
+        """Return the remote memory block: the index read over ssh, its links left relative.
+
+        The index is read through the ControlMaster with a `MEMORY_READ_TIMEOUT_S` limit, never
+        through the sshfs mount, whose reads block while the host hangs. The index is also
+        saved to `memory.cache_path` for the SessionStart hook. A host that does not answer
+        in time yields the "no remote memory" block.
+        """
+        if not self.mounted_mem or self.mem_uri is None:
             return memory.render_block(self.alias, None, None)
-        index_path = self.mem_dir / 'MEMORY.md'
+        index_path = shlex.quote(f'{self.mem_uri}/MEMORY.md')
         try:
-            index_md = index_path.read_text(encoding='utf-8', errors='replace')
-        except OSError:
+            result = self.master.run(f'head -c {MEMORY_INDEX_MAX_BYTES} -- {index_path}', timeout=MEMORY_READ_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            LOG.warning('%s: reading MEMORY.md timed out after %.0f s', self.alias, MEMORY_READ_TIMEOUT_S)
             return memory.render_block(self.alias, None, None)
+        if result.returncode != 0:
+            return memory.render_block(self.alias, None, None)
+        index_md = result.stdout.decode('utf-8', errors='replace')
+        try:
+            cache = memory.cache_path(self.runtime_dir, self.alias)
+            state.ensure_private_dir(cache.parent)
+            state.write_text_atomic(cache, index_md)
+        except OSError:
+            LOG.exception('%s: caching MEMORY.md failed', self.alias)
         return memory.render_block(self.alias, index_md, self.mem_dir)
 
     #---------------------------------------------------------------------
@@ -499,6 +518,9 @@ class Server:
         self._torn_down = False
         self._sid_lock = threading.Lock()
         self.registered_sid: str | None = None
+        self._autoconnect_sid: str | None = None
+        self._startup_done = False
+        self._autoconnect_lock = threading.Lock()
 
     #---------------------------------------------------------------------
     # Tool dispatch
@@ -705,7 +727,8 @@ class Server:
             report = session.disconnect(self.__messaging_store(), self.messaging_session_id())
         self.runtime.update_state(drop)
         self.runtime.drop_context(alias)
-        lines = [f'disconnected {alias}', *report, f'Paths under {session.fs_dir.parent} no longer exist; earlier remote memory links are stale.']
+        memory.cache_path(self.runtime.dir, alias).unlink(missing_ok=True)
+        lines = [f'disconnected {alias}', *report, f'The mounts under {session.fs_dir.parent} are gone; earlier remote memory links are stale.']
         return '\n'.join(lines), False
 
     #---------------------------------------------------------------------
@@ -724,20 +747,30 @@ class Server:
             self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, messaging=self.config.messaging, ssh_opts=self.config.ssh_opts))
             self.sweep()
             targets = self.__recover_previous()
-            self.wait_session_id(OWNER_WAIT_S)
+            self._autoconnect_sid = self.wait_session_id(OWNER_WAIT_S)
             self.sync_session_id()
-            autoconnect = state.read_json(self.runtime.dir / 'autoconnect.json', [])
+            targets.extend(self.__autoconnect_targets())
             self.runtime.update_owner(autoconnect_read=True)
-            targets.extend((entry['alias'], entry['host'], entry.get('path', '~')) for entry in autoconnect if isinstance(entry, dict) and 'alias' in entry and 'host' in entry)
         except Exception:
             LOG.exception('startup failed')
             return
-        seen = set()
-        for alias, host, path in targets:
-            if alias in seen:
-                continue
-            seen.add(alias)
-            threading.Thread(target=self.__connect_background, args=(alias, host, path), daemon=True).start()
+        self.__connect_all(targets)
+        self._startup_done = True
+
+    def autoconnect_new_session(self) -> None:
+        """Connect the autoconnect hosts of a session that began after startup.
+
+        `/clear` and `/resume` keep the process and the server but make SessionStart write a
+        new session id and a fresh `autoconnect.json`. Hosts of that file that are not
+        connected yet are connected in the background. Does nothing before startup finished,
+        while the id is unknown or unchanged.
+        """
+        session_id = self.session_id()
+        with self._autoconnect_lock:
+            if not self._startup_done or not session_id or session_id == self._autoconnect_sid:
+                return
+            self._autoconnect_sid = session_id
+        self.__connect_all(self.__autoconnect_targets())
 
     def run_loop(self) -> None:
         """Tick every `poll_interval_s` until teardown."""
@@ -764,6 +797,7 @@ class Server:
             self.on_exit()
             return
         self.sync_session_id()
+        self.autoconnect_new_session()
         self.update_pending_flag()
         with self.lock:
             sessions = list(self.hosts.values())
@@ -802,6 +836,7 @@ class Server:
         self.runtime.update_state(lambda saved: saved.update(hosts={}, redirect=None))
         for alias in aliases:
             self.runtime.drop_context(alias)
+            memory.cache_path(self.runtime.dir, alias).unlink(missing_ok=True)
 
     def update_pending_flag(self) -> None:
         """Create the pending flag while this session's inbox holds messages, remove it otherwise."""
@@ -851,8 +886,9 @@ class Server:
 
         `/clear` keeps the Claude process and the server but makes SessionStart write a
         new session id. The old id is unregistered locally and on every connected host,
-        and the new one registered in its place. Does nothing with messaging off or while
-        the id is unknown or unchanged.
+        and the new one registered in its place. Messages still unread under the old id,
+        local ones and those waiting in a host's outbox, move to the new id's inbox. Does
+        nothing with messaging off or while the id is unknown or unchanged.
         """
         if not self.config.messaging:
             return
@@ -871,10 +907,13 @@ class Server:
                 if old_sid:
                     try:
                         relay.remote_unregister(session.master, old_sid)
+                        relay.pull_outbox(session.master, old_sid, self.store, timeout=POLL_PULL_TIMEOUT_S)
                     except Exception:
-                        LOG.exception('%s: unregister of %s failed', session.alias, old_sid)
+                        LOG.exception('%s: unregister or final pull of %s failed', session.alias, old_sid)
                 for warning in self.__register_remote(session, session_id):
                     LOG.warning('%s: %s', session.alias, warning)
+            if old_sid:
+                self.__move_inbox(old_sid, session_id)
 
     def wait_session_id(self, timeout: float) -> str | None:
         """Poll owner.json for the session id for up to `timeout` seconds."""
@@ -898,6 +937,15 @@ class Server:
     #---------------------------------------------------------------------
     # Private helpers
     #---------------------------------------------------------------------
+
+    def __move_inbox(self, old_sid: str, new_sid: str) -> None:
+        """Move the unread messages of `old_sid` into the inbox of `new_sid`, addressed to it."""
+        for msg in self.store.pending(old_sid):
+            try:
+                self.store.deliver({**msg, 'to_session': new_sid})
+                (self.store.base / 'inbox' / old_sid / f'{msg["id"]}.json').unlink(missing_ok=True)
+            except Exception:
+                LOG.exception('moving message %s to %s failed', msg.get('id'), new_sid)
 
     def __connected(self, alias: str) -> tuple[HostSession | None, str]:
         """Return the connected session for `alias`, or None and an error line.
@@ -1019,6 +1067,25 @@ class Server:
         lines.extend(f'warning: {warning}' for warning in warnings)
         lines.extend(['', session.memory_block()])
         return '\n'.join(lines)
+
+    def __autoconnect_targets(self) -> list[tuple[str, str, str]]:
+        """Return (alias, host, path) of every entry in the runtime `autoconnect.json`."""
+        entries = state.read_json(self.runtime.dir / 'autoconnect.json', [])
+        if not isinstance(entries, list):
+            return []
+        return [(entry['alias'], entry['host'], entry.get('path', '~')) for entry in entries
+                if isinstance(entry, dict) and 'alias' in entry and 'host' in entry]
+
+    def __connect_all(self, targets: list[tuple[str, str, str]]) -> None:
+        """Start a background connect per distinct alias that is not connected yet."""
+        seen = set()
+        for alias, host, path in targets:
+            with self.lock:
+                connected = alias in self.hosts
+            if alias in seen or connected:
+                continue
+            seen.add(alias)
+            threading.Thread(target=self.__connect_background, args=(alias, host, path), daemon=True).start()
 
     def __connect_background(self, alias: str, host: str, path: str) -> None:
         """Connect one host from startup recovery or autoconnect and queue its report for the session.

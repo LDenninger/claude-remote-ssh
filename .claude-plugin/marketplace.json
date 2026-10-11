@@ -1,0 +1,21 @@
+{
+  "name": "remote-ssh",
+  "owner": {
+    "name": "Luis Denninger"
+  },
+  "description": "Marketplace for the remote-ssh Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "remote-ssh",
+      "source": "./",
+      "description": "Message between Claude Code sessions on different machines, and run commands, edit files and use project memory on remote hosts over SSH.",
+      "category": "development",
+      "tags": [
+        "ssh",
+        "remote",
+        "sshfs",
+        "messaging"
+      ]
+    }
+  ]
+}

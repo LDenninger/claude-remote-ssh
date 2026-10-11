@@ -45,7 +45,7 @@ body:
       label: Steps to reproduce
       placeholder: |
         1. claude plugin install remote-ssh@remote-ssh
-        2. /remote-ssh:remote-connect gpu-a
+        2. /remote-ssh-connect gpu-a
         3. ...
     validations:
       required: true

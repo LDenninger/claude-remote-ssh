@@ -14,7 +14,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Each job runs only once the code it checks exists, so the pipeline stays green on a bare branch.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      plugin: ${{ steps.files.outputs.plugin }}
+      unit: ${{ steps.files.outputs.unit }}
+      integration: ${{ steps.files.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: files
+        run: |
+          echo "plugin=$([ -f .claude-plugin/plugin.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "unit=$([ -d tests/unit ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "integration=$([ -d tests/integration ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   versions:
+    needs: detect
+    if: needs.detect.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +42,8 @@ jobs:
         run: python .github/scripts/release_check.py
 
   validate:
+    needs: detect
+    if: needs.detect.outputs.plugin == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +56,8 @@ jobs:
         run: claude plugin validate . --strict
 
   unit:
+    needs: detect
+    if: needs.detect.outputs.unit == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,6 +75,8 @@ jobs:
         run: python -m pytest tests/unit -q
 
   integration:
+    needs: detect
+    if: needs.detect.outputs.integration == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

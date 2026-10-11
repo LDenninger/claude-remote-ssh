@@ -44,7 +44,7 @@ def test_connect_exec_mount_and_disconnect(session: Any, sshd: dict, remote_dir:
     connect_text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
     assert not is_error, connect_text
     assert connect_text.startswith('connect h1 · ') and f'\npath: {remote_dir}\n' in connect_text
-    assert '\nredirect: remote_mode("h1")' in connect_text
+    assert '\nbash: runs here (remote_mode("h1") runs it on h1)' in connect_text
     assert len(master_pids(sess.rt, 'h1')) == 1
 
     #--- remote_exec runs in the project path and passes the exit code through ---

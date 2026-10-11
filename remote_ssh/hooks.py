@@ -336,7 +336,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     Claude Code matches permission rules against the rewritten ssh command, so the user's Bash
     deny rules would never match the original. The hook therefore checks them against the
     original command and denies on a match, and it shows the original command in the approval
-    prompt.
+    prompt. The remote command first prints `[<alias>]` on its own line, so a redirected result
+    shows which host ran it, and the command's exit code passes through unchanged.
     """
     if payload.get('tool_name') != 'Bash':
         return None
@@ -378,7 +379,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
             ('command', command[:REASON_COMMAND_CHARS])))
     try:
         extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
-        argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None,
+        marked = f"{{ printf '[%s]\\n' {shlex.quote(target)}\n{command}\n}}"
+        argv = exec_argv(runtime.ctl_path(target), entry['host'], marked, entry.get('path'), extra=extra or None,
                          remote_timeout=bash_timeout_s(tool_input))
     except Exception as exc:
         sys.stderr.write(f'remote-ssh: {exc!r}\n')

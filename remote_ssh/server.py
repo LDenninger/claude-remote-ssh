@@ -86,6 +86,7 @@ class Config:
 # Tool schemas
 #---------------------------------------------------------------------
 
+MODE_OFF_WORDS = ('null', 'none', 'off')
 ALIAS_SCHEMA = {'type': 'string', 'pattern': state.ALIAS_RE}
 
 TOOLS: list[dict[str, Any]] = [
@@ -109,7 +110,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         'name': 'remote_status',
-        'description': 'List hosts, mounts, redirect target and missing local tools.',
+        'description': 'List hosts, their file and memory mounts (remote path to local mount), redirect target and missing local tools.',
         'inputSchema': {'type': 'object', 'properties': {}},
     },
     {
@@ -128,7 +129,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         'name': 'remote_mode',
-        'description': 'Run later Bash tool calls on a host, or locally again with null.',
+        'description': 'Run later Bash tool calls on a host, or locally again with null. The strings "null", "none" and "off" also mean local, any other alias must be connected.',
         'inputSchema': {
             'type': 'object',
             'properties': {'alias': {'type': ['string', 'null'], 'description': 'Connected alias or null.'}},
@@ -355,7 +356,8 @@ class HostSession:
         if store is not None and session_id and self.status == 'connected' and self.master.is_listening():
             try:
                 pulled = relay.pull_outbox(self.master, session_id, store, timeout=TEARDOWN_MESSAGING_TIMEOUT_S)
-                report.append(('pulled', str(pulled)))
+                if pulled:
+                    report.append(('replies fetched', str(pulled)))
                 relay.remote_unregister(self.master, session_id, timeout=TEARDOWN_MESSAGING_TIMEOUT_S)
             except Exception as exc:
                 LOG.warning('%s: messaging teardown failed: %r', self.alias, exc)
@@ -416,7 +418,7 @@ class HostSession:
         The index is read through the ControlMaster with a `MEMORY_READ_TIMEOUT_S` limit, never
         through the sshfs mount, whose reads block while the host hangs. The index is also
         saved to `memory.cache_path` for the SessionStart hook. A host that does not answer
-        in time yields an empty string.
+        in time, or whose index is missing or blank, yields an empty string.
         """
         if not self.mounted_mem or self.mem_uri is None:
             return ''
@@ -429,6 +431,9 @@ class HostSession:
         if result.returncode != 0:
             return ''
         index_md = result.stdout.decode('utf-8', errors='replace')
+        if not index_md.strip():
+            memory.cache_path(self.runtime_dir, self.alias).unlink(missing_ok=True)
+            return ''
         try:
             cache = memory.cache_path(self.runtime_dir, self.alias)
             state.ensure_private_dir(cache.parent)
@@ -565,10 +570,13 @@ class Server:
         saved = self.runtime.load_state()
         with self.lock:
             sessions = dict(self.hosts)
-        rows, notes = [], []
+        rows, notes, mounts = [], [], []
         for alias, session in sorted(sessions.items()):
             state_word = 'master-down' if session.status == 'connected' and not session.is_healthy() else session.status
             rows.append([alias, state_word, 'mounted' if session.mounted_fs else '-', 'mounted' if session.mounted_mem else '-', self.__session_count(session)])
+            lines = [f'files: {session.abs_path} -> {session.fs_dir}' if session.mounted_fs else None,
+                     f'memory: {session.mem_uri} -> {session.mem_dir}' if session.mounted_mem else None]
+            mounts.append(fmt.block(f'mounts of {alias}', '\n'.join(line for line in lines if line)))
             if session.error:
                 notes.append(fmt.block(f'error from {alias} (data)', fmt.quote(relay.clean_text(session.error, 300))))
         for alias, entry in sorted(saved['hosts'].items()):
@@ -580,7 +588,9 @@ class Server:
         return fmt.compose(
             fmt.head('status', None, fmt.count(len(rows), 'host'), f'redirect {redirect or "off"}'),
             fmt.table(['host', 'state', 'files', 'memory', 'sessions'], rows) if rows else '',
-            *fmt.fields(('messaging', 'on' if self.config.messaging else 'off'), ('session', self.session_id() or 'unknown'), ('runtime', self.runtime.dir)),
+            *fmt.fields(('messaging', 'on' if self.config.messaging else 'off'), ('session', self.session_id() or 'unknown'), ('runtime', self.runtime.dir),
+                        ('next', None if rows else 'remote_connect("<alias>") with the ssh host and project path')),
+            *mounts,
             *notes,
             fmt.block('missing tools', platform.missing_message(platform.missing(self.tools))),
         ), False
@@ -607,8 +617,14 @@ class Server:
         return fmt.compose(fmt.head('exec', alias, f'exit {code}'), *blocks), code >= 124
 
     def tool_remote_mode(self, args: dict[str, Any]) -> tuple[str, bool]:
-        """Set or clear the Bash redirect target."""
+        """Set or clear the Bash redirect target.
+
+        None, an empty alias, and the strings "null", "none" and "off" (unless such an alias is
+        connected) clear it. Any other alias must be connected.
+        """
         alias = args.get('alias')
+        if isinstance(alias, str) and alias.lower() in MODE_OFF_WORDS and alias not in self.hosts:
+            alias = None
         if alias:
             session, error = self.__connected('mode', alias)
             if session is None:
@@ -741,12 +757,14 @@ class Server:
             if known:
                 return fmt.compose(fmt.head('disconnect', alias, 'was not connected'), 'removed: saved state'), False
             return self.__not_connected('disconnect', alias), True
+        had_memory = session.mounted_mem
         with session.lock:
             report = session.disconnect(self.__messaging_store(), self.messaging_session_id())
         self.runtime.update_state(drop)
         self.runtime.drop_context(alias)
         memory.cache_path(self.runtime.dir, alias).unlink(missing_ok=True)
-        return fmt.compose(fmt.head('disconnect', alias), *fmt.fields(*report, ('note', f'earlier memory links to {alias} are stale'))), False
+        note = f'memory paths under {session.mem_dir} are gone; reconnect {alias} to read its memory again' if had_memory else None
+        return fmt.compose(fmt.head('disconnect', alias), *fmt.fields(*report, ('note', note))), False
 
     #---------------------------------------------------------------------
     # Startup, loop and teardown
@@ -1077,22 +1095,33 @@ class Server:
         return []
 
     def __connect_report(self, session: HostSession, warnings: list[str], background: bool) -> str:
-        """Build the `remote_connect` result: mounts, remote sessions, where Bash runs, memory block."""
+        """Build the `remote_connect` result: other sessions, mounts, where Bash runs, memory.
+
+        The header counts the sessions `remote_sessions` lists without the row marked
+        `this session`. The `memory:` field is the mount path followed by the index block, or
+        `none` when the remote project has no memory directory or an empty index, or
+        `not mounted` when the mount is unavailable.
+        """
         redirected = self.runtime.load_state().get('redirect') == session.alias
         names, count = None, None
         if self.config.messaging:
             try:
                 remote = [entry for entry in relay.remote_sessions(session.master) if entry.get('session_id') != self.session_id()]
-                names, count = ', '.join(relay.clean_text(entry.get('name')) for entry in remote), fmt.count(len(remote), 'session')
+                names, count = ', '.join(relay.clean_text(entry.get('name')) for entry in remote), fmt.count(len(remote), 'other session')
             except Exception as exc:
                 names = f'unavailable ({relay.clean_text(exc, 100)})'
+        index = session.memory_block() if session.mounted_mem else ''
+        if session.mounted_mem:
+            memory_field = session.mem_dir if index else 'none'
+        else:
+            memory_field = 'none' if not session.mem_found else 'not mounted'
+        bash = f'runs on {session.alias}' if redirected else f'runs here (remote_mode("{session.alias}") runs it on {session.alias})'
         return fmt.compose(
-            fmt.head('connect', session.alias, count, f'bash {session.alias if redirected else "local"}', 'background' if background else None),
+            fmt.head('connect', session.alias, count, 'background' if background else None),
             *fmt.fields(('path', session.abs_path), ('files', session.fs_dir if session.mounted_fs else 'not mounted'),
-                        ('memory', session.mem_dir if session.mounted_mem else 'not mounted'), ('sessions', names or None),
-                        ('redirect', None if redirected else f'remote_mode("{session.alias}")')),
+                        ('memory', memory_field), ('sessions', names or None), ('bash', bash)),
             *fmt.fields(*(('warning', relay.clean_text(warning, 300)) for warning in warnings)),
-            session.memory_block(),
+            index,
         )
 
     def __autoconnect_targets(self) -> list[tuple[str, str, str]]:

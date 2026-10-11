@@ -47,6 +47,7 @@ def test_redirect_runs_on_remote_and_local_prefix_runs_locally(session: Any, ssh
     assert output['updatedInput']['description'] == 'test'
     result = run_bash(output['updatedInput']['command'], sess.cwd, bash_env)
     assert result.returncode == 7, result.stderr
+    assert result.stdout == '[h1]\n'
     ssh_connection, pwd = (remote_dir / 'where.txt').read_text().splitlines()
     assert ssh_connection.split()[-1] == sshd['opts'].split('-p ')[1].split()[0]
     assert pwd == str(remote_dir)

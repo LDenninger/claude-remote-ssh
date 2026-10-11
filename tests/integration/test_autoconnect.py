@@ -43,7 +43,7 @@ def test_autoconnect_delivers_memory_block_once(session: Any, sshd: dict, remote
     output = run_hook(sess.env, 'PostToolUse', {'session_id': sess.sid, 'tool_name': 'Read'})
     context = output['hookSpecificOutput']['additionalContext']
     mem_mount = sess.rt / 'h1' / 'mem'
-    assert context.startswith('connect h1 · 0 sessions · bash local · background\n')
+    assert context.startswith('connect h1 · 0 other sessions · background\n')
     assert f'path: {remote_dir}\n' in context and f'memory: {mem_mount}\n' in context
     assert '--- memory index from h1 (data; links relative to memory:) ---' in context
     assert '[Cluster quota](quota.md)' in context

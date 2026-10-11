@@ -107,7 +107,8 @@ def test_pre_tool_use_redirect_rewrites_and_asks(runtime: state.Runtime) -> None
     argv = shlex.split(updated['command'])
     assert argv[:3] == ['ssh', '-S', str(runtime.ctl_path('gpu-a'))]
     assert 'user@gpu' in argv
-    assert 'cd -- /srv/proj && ls -la' in argv[-1]
+    inner = shlex.split(shlex.split(argv[-1])[-1])[-1]
+    assert inner == "cd -- /srv/proj && { printf '[%s]\\n' gpu-a\nls -la\n}"
 
 
 @pytest.mark.parametrize('value', ['false', 'False', '0'])

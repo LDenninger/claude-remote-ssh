@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `remote_connect` counts `N other sessions`, the rows `remote_sessions` shows without `this session`.
+  Where Bash runs moves from the first line (`bash local`) to a `bash:` field that names the
+  command to switch (`runs here (remote_mode("node2") runs it on node2)`).
+- The `memory:` field of `remote_connect` reads `none` when the remote project has no memory
+  directory or an empty index, and `not mounted` when the mount is unavailable.
+- `remote_status` adds one `--- mounts of <alias> ---` block per host with the remote path and its
+  local mount for files and memory, and `next: remote_connect(...)` when no host is connected.
+- `remote_disconnect` reports `replies fetched` only when a reply was fetched, and its note names the
+  memory path that is gone and how to read it again.
+- A redirected Bash result starts with the line `[<alias>]`, so the host that ran it is visible. The
+  exit code is unchanged.
+- `remote_mode` also reads the strings `null`, `none` and `off` as local mode. Any other alias must be
+  connected.
+
 ## [0.1.1] - 2026-10-11
 
 ### Fixed

@@ -47,7 +47,7 @@ def test_message_round_trip_including_after_reconnect(session: Any, sshd: dict, 
 
     text, is_error = sess_a.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
     assert not is_error, text
-    assert text.startswith('connect h1 · 1 session · ') and '\nsessions: ' in text, text
+    assert text.startswith('connect h1 · 1 other session') and '\nsessions: ' in text, text
     assert (remote_base / 'sessions' / f'{sess_a.sid}.json').exists()
 
     #--- A -> B lands directly in B's inbox on the remote ---

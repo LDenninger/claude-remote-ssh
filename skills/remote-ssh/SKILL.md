@@ -50,5 +50,5 @@ After a remote-ssh tool call, answer in two lines: a facts line, then `next: <ac
 there is nothing to suggest. Bold the host name and counts, put paths, session names and ids in code
 spans, and highlight nothing else: no headings, no further bold, no emoji, no colour words.
 
-    **gpu** connected · **1** session (`train-befb`) · bash local
+    **gpu** connected · **1** other session (`train-befb`) · Bash runs here
     next: ask `train-befb`, or run commands on **gpu**

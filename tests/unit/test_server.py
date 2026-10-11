@@ -487,14 +487,14 @@ def test_exec_result_omits_empty_streams(live_app: tuple[server.Server, list]) -
 def test_connect_report_says_where_bash_runs(live_app: tuple[server.Server, list]) -> None:
     app, _ = live_app
     app.config.messaging = False
-    host = SimpleNamespace(alias='gpu-a', host='h', abs_path='/p', fs_dir=Path('/fs'), mounted_fs=True, mem_dir=Path('/mem'), mounted_mem=False,
+    host = SimpleNamespace(alias='gpu-a', host='h', abs_path='/p', fs_dir=Path('/fs'), mounted_fs=True, mem_dir=Path('/mem'), mounted_mem=False, mem_found=False,
                            memory_block=lambda: '')
     report = app._Server__connect_report(host, [], False)
-    assert report.startswith('connect gpu-a · bash local\n')
-    assert 'redirect: remote_mode("gpu-a")' in report
+    assert report.startswith('connect gpu-a\n')
+    assert 'bash: runs here (remote_mode("gpu-a") runs it on gpu-a)' in report
     app.runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
     report = app._Server__connect_report(host, [], False)
-    assert report.startswith('connect gpu-a · bash gpu-a\n') and 'redirect:' not in report
+    assert report.startswith('connect gpu-a\n') and 'bash: runs on gpu-a' in report and 'remote_mode' not in report
 
 
 def test_send_rejects_oversized_body(live_app: tuple[server.Server, list]) -> None:

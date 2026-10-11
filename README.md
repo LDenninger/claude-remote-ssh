@@ -75,6 +75,13 @@ claude --plugin-dir ./remote-ssh
 On the local machine: OpenSSH 8.0 or later, Python 3.9 or later, and sshfs with FUSE for the mounts
 and remote memory.
 
+| tested platform | Python | OpenSSH |
+|---|---|---|
+| Ubuntu 22.04 | 3.10 (system) | 8.9 |
+| Ubuntu 24.04 | 3.12 (system) | 9.6 |
+| Ubuntu 26.04 | 3.14 (system) | 10.2 |
+| macOS | 3.9 and 3.12 | system |
+
 | OS | install command |
 |---|---|
 | Ubuntu / Debian | `sudo apt install openssh-client sshfs python3` |
@@ -170,8 +177,9 @@ Runtime files, control sockets and mounts live under `$XDG_RUNTIME_DIR/remote-ss
 
 Questions and bug reports go to [GitHub issues](https://github.com/LDenninger/claude-remote-ssh/issues),
 and pull requests are welcome. CI runs `claude plugin validate . --strict` on the marketplace and
-the plugin manifest, the unit tests on Ubuntu
-and macOS with Python 3.9 and 3.12, and the integration tests against a local sshd on Ubuntu.
+the plugin manifest, the unit and integration tests on Ubuntu 22.04, 24.04 and 26.04 with each
+release's system Python, OpenSSH and sshfs, and the unit tests on macOS with Python 3.9 and 3.12.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Testing
 

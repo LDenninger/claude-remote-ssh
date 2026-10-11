@@ -85,13 +85,14 @@ Windows is not. Unit and integration tests run on Ubuntu 22.04, 24.04 and 26.04 
 For messaging, start `claude` on the server as usual. Then connect the host from your machine:
 
 ```text
-/remote-ssh:remote-connect gpu-a
-/remote-ssh:remote-connect gpu-b user@gpu-b.example.org ~/projects/train
-/remote-ssh:remote-status
+/remote-ssh-connect gpu-a
+/remote-ssh-connect gpu-b user@gpu-b.example.org ~/projects/train
+/remote-ssh-status
 ```
 
 Arguments are `<alias> [host] [path]`, with `host` defaulting to the alias and `path` to the local
-project path. The result lists the Claude sessions running on that host. Then ask in plain
+project path. The namespaced forms `/remote-ssh:remote-ssh-connect` and
+`/remote-ssh:remote-ssh-status` work when another command already uses the short name. The result lists the Claude sessions running on that host. Then ask in plain
 language:
 
 ```text
@@ -143,7 +144,7 @@ Plugin options, set through `/config`:
   `ssh-add` or accept the host key once by hand.
 - **Mount hangs (`Transport endpoint is not connected`):** disconnect and reconnect the alias.
 - **Stale mount after a crash:** `fusermount3 -uz <mount path>` on Linux, `diskutil unmount force
-  <mount path>` on macOS. `/remote-ssh:remote-status` prints the paths.
+  <mount path>` on macOS. `/remote-ssh-status` prints the paths.
 - **No mounts on macOS:** allow the macFUSE extension under System Settings, Privacy & Security.
 
 ## 🔒 Security

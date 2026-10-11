@@ -28,7 +28,7 @@ All notable changes to this project are documented in this file. The format foll
 - Redirect mode fails closed: a `Bash` call is denied while its host is not connected.
 - Relayed messages carry the host alias they were pulled from.
 - Remote memory follows Claude Code's per-repository memory directory, named after the git root.
-- Skills `remote-ssh`, `remote-connect` and `remote-status`.
+- Skills `remote-ssh` (model-invoked), `/remote-ssh-connect` and `/remote-ssh-status`.
 - `PRIVACY.md`, and README sections on what the plugin runs, sends and stores.
 
 ### Security

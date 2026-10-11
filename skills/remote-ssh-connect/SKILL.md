@@ -1,5 +1,5 @@
 ---
-name: remote-connect
+name: remote-ssh-connect
 description: Connect this session to a remote host over SSH, mount its project directory and load its project memory.
 argument-hint: <alias> [host] [path]
 disable-model-invocation: true

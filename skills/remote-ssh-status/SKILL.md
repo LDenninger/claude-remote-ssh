@@ -1,5 +1,5 @@
 ---
-name: remote-status
+name: remote-ssh-status
 description: Show every connected remote host with its connection state, mounts, the redirect target and missing local tools.
 disable-model-invocation: true
 ---

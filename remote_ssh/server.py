@@ -165,7 +165,7 @@ def now_iso() -> str:
 
 
 def expand_remote_path(path: str) -> str:
-    """Return a shell word that `realpath` resolves relative to the remote home.
+    """Return a shell word that `cd` resolves relative to the remote home.
 
     Args:
         path: Requested remote path. `~` and `~/x` become `.` and `x`, since the resolve
@@ -176,6 +176,20 @@ def expand_remote_path(path: str) -> str:
     if path.startswith('~/'):
         return shlex.quote(path[2:])
     return shlex.quote(path)
+
+
+def build_resolve_script(path: str) -> str:
+    """Return a POSIX sh script printing the remote home and the physical project path.
+
+    `cd` followed by `pwd -P` works on GNU and BSD alike, unlike `realpath -m`. The script
+    prints `home=<dir>`, then `path=<dir>` when the directory exists or `missing=1` when
+    it does not.
+
+    Args:
+        path: Requested remote path, absolute, `~`-relative or relative to the home.
+    """
+    return (f'printf "home=%s\\n" "$HOME" && cd ~ && '
+            f'if cd -- {expand_remote_path(path)} 2>/dev/null; then printf "path=%s\\n" "$(pwd -P)"; else printf "missing=1\\n"; fi')
 
 
 def cleanup_runtime_dir(run_dir: Path, ssh_opts: list[str]) -> bool:
@@ -379,10 +393,11 @@ class HostSession:
 
     def __resolve_paths(self) -> None:
         """Resolve the remote home, the absolute project path, its slug and memory directory."""
-        script = f'printf "home=%s\\n" "$HOME" && cd ~ && printf "path=%s\\n" "$(realpath -m -- {expand_remote_path(self.path)})"'
-        result = self.master.run(script, timeout=RESOLVE_TIMEOUT_S)
+        result = self.master.run(build_resolve_script(self.path), timeout=RESOLVE_TIMEOUT_S)
         lines = result.stdout.decode('utf-8', errors='replace').splitlines()
-        values = {line.split('=', 1)[0]: line.split('=', 1)[1] for line in lines if line.startswith(('home=', 'path='))}
+        values = {line.split('=', 1)[0]: line.split('=', 1)[1] for line in lines if line.startswith(('home=', 'path=', 'missing='))}
+        if values.get('missing'):
+            raise ConnectError(f'remote directory {self.path!r} does not exist on {self.host} or is not accessible')
         if result.returncode != 0 or not values.get('home') or not values.get('path'):
             raise ConnectError(f'cannot resolve remote path {self.path!r}: {result.stderr.decode("utf-8", errors="replace").strip()}')
         self.abs_path = values['path']
@@ -431,6 +446,8 @@ class Server:
 
     Attributes:
         hosts: Live host sessions by alias.
+        registered_sid: Session id registered for messaging, locally and on every connected
+            host. None before the first registration or with messaging off.
     """
 
     def __init__(self, runtime: state.Runtime | None, config: Config, store: relay.Store | None = None,
@@ -447,6 +464,8 @@ class Server:
         self._stop = threading.Event()
         self._teardown_lock = threading.Lock()
         self._torn_down = False
+        self._sid_lock = threading.Lock()
+        self.registered_sid: str | None = None
 
     #---------------------------------------------------------------------
     # Tool dispatch
@@ -620,7 +639,7 @@ class Server:
                 session.status, session.error = 'failed', str(exc)
                 self.__save_host(session)
                 return f'remote_connect failed: {alias} ({host})\n{exc}', True
-            warnings.extend(self.__register_remote(session))
+            warnings.extend(self.__register_remote(session, self.messaging_session_id()))
             self.__save_host(session)
         return self.__connect_report(session, warnings), False
 
@@ -645,7 +664,7 @@ class Server:
                 return f'removed {alias} (was not connected)', False
             return f'remote_disconnect failed: {alias} is not connected', True
         with session.lock:
-            report = session.disconnect(self.__messaging_store(), self.session_id())
+            report = session.disconnect(self.__messaging_store(), self.messaging_session_id())
         self.runtime.update_state(drop)
         lines = [f'disconnected {alias}', *report, f'Paths under {session.fs_dir.parent} no longer exist; earlier remote memory links are stale.']
         return '\n'.join(lines), False
@@ -663,19 +682,12 @@ class Server:
         """Sweep stale runtime dirs, recover the previous instance's hosts and autoconnect."""
         try:
             self.runtime.update_owner(server_pid=os.getpid())
-            self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s))
+            #--- hooks run without the server's env: they read the ssh options from state.json ---
+            self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, ssh_opts=self.config.ssh_opts))
             self.sweep()
             targets = self.__recover_previous()
-            session_id = self.wait_session_id(OWNER_WAIT_S)
-            if session_id and self.config.messaging:
-                owner = self.runtime.owner()
-                self.store.register(session_id, {
-                    'name': owner.get('name') or relay.session_name(owner.get('cwd', ''), session_id),
-                    'cwd': owner.get('cwd', ''),
-                    'host': self.hostname,
-                    'pid': self.runtime.claude.pid,
-                    'started': self.started,
-                })
+            self.wait_session_id(OWNER_WAIT_S)
+            self.sync_session_id()
             autoconnect = state.read_json(self.runtime.dir / 'autoconnect.json', [])
             targets.extend((entry['alias'], entry['host'], entry.get('path', '~')) for entry in autoconnect if isinstance(entry, dict) and 'alias' in entry and 'host' in entry)
         except Exception:
@@ -709,10 +721,11 @@ class Server:
             self.teardown_all()
             self.on_exit()
             return
+        self.sync_session_id()
         with self.lock:
             sessions = list(self.hosts.values())
         store = self.__messaging_store()
-        session_id = self.session_id()
+        session_id = self.messaging_session_id()
         for session in sessions:
             if not session.lock.acquire(blocking=False):
                 continue
@@ -731,7 +744,7 @@ class Server:
             with self.lock:
                 sessions = list(self.hosts.values())
                 self.hosts.clear()
-            session_id = self.session_id() if self.runtime is not None else None
+            session_id = self.messaging_session_id() if self.runtime is not None else None
             for session in sessions:
                 with session.lock:
                     try:
@@ -774,6 +787,40 @@ class Server:
     def session_id(self) -> str | None:
         """Return the session id the SessionStart hook wrote into owner.json, None before that."""
         return self.runtime.owner().get('session_id') if self.runtime is not None else None
+
+    def messaging_session_id(self) -> str | None:
+        """Return the session id registered for messaging, else the one in owner.json."""
+        return self.registered_sid or self.session_id()
+
+    def sync_session_id(self) -> None:
+        """Register the session id from owner.json, replacing an older registration.
+
+        `/clear` keeps the Claude process and the server but makes SessionStart write a
+        new session id. The old id is unregistered locally and on every connected host,
+        and the new one registered in its place. Does nothing with messaging off or while
+        the id is unknown or unchanged.
+        """
+        if not self.config.messaging:
+            return
+        with self._sid_lock:
+            session_id, old_sid = self.session_id(), self.registered_sid
+            if not session_id or session_id == old_sid:
+                return
+            if old_sid:
+                LOG.info('session id changed from %s to %s, re-registering', old_sid, session_id)
+                self.store.unregister(old_sid)
+            self.store.register(session_id, self.__session_entry(session_id))
+            self.registered_sid = session_id
+            with self.lock:
+                sessions = [session for session in self.hosts.values() if session.status == 'connected']
+            for session in sessions:
+                if old_sid:
+                    try:
+                        relay.remote_unregister(session.master, old_sid)
+                    except Exception:
+                        LOG.exception('%s: unregister of %s failed', session.alias, old_sid)
+                for warning in self.__register_remote(session, session_id):
+                    LOG.warning('%s: %s', session.alias, warning)
 
     def wait_session_id(self, timeout: float) -> str | None:
         """Poll owner.json for the session id for up to `timeout` seconds."""
@@ -819,27 +866,33 @@ class Server:
         entry = session.to_state()
         self.runtime.update_state(lambda saved: saved['hosts'].__setitem__(session.alias, entry))
 
-    def __register_remote(self, session: HostSession) -> list[str]:
+    def __session_entry(self, session_id: str) -> dict[str, Any]:
+        """Return the registry entry of this session, without `relay_via`."""
+        owner = self.runtime.owner()
+        return {
+            'name': owner.get('name') or relay.session_name(owner.get('cwd', ''), session_id),
+            'cwd': owner.get('cwd', ''),
+            'host': self.hostname,
+            'pid': self.runtime.claude.pid,
+            'started': self.started,
+        }
+
+    def __register_remote(self, session: HostSession, session_id: str | None) -> list[str]:
         """Register this session on the remote and clean stale registrations from this machine.
+
+        Args:
+            session: Connected host to register on.
+            session_id: Own session id, None when SessionStart has not written it yet.
 
         Returns:
             Warning lines, empty on success or when messaging is off.
         """
-        session_id = self.session_id()
         if not self.config.messaging:
             return []
         if not session_id:
             return ['messaging: own session id unknown, not registered on the remote']
-        owner = self.runtime.owner()
         try:
-            relay.remote_register(session.master, session_id, {
-                'name': owner.get('name') or relay.session_name(owner.get('cwd', ''), session_id),
-                'cwd': owner.get('cwd', ''),
-                'host': self.hostname,
-                'pid': self.runtime.claude.pid,
-                'started': self.started,
-                'relay_via': self.hostname,
-            })
+            relay.remote_register(session.master, session_id, {**self.__session_entry(session_id), 'relay_via': self.hostname})
             relay.remote_cleanup(session.master, self.hostname, self.live_session_ids())
         except Exception as exc:
             LOG.exception('%s: remote registration failed', session.alias)

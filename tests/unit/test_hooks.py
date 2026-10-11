@@ -78,6 +78,23 @@ def test_pre_tool_use_without_confirm_sets_no_decision(runtime: state.Runtime, m
     assert shlex.split(output['updatedInput']['command'])[0] == 'ssh'
 
 
+def test_pre_tool_use_uses_ssh_opts_saved_by_server(runtime: state.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_SSH_OPTS', '-p 1')
+    set_redirect(runtime)
+    runtime.update_state(lambda saved: saved.update(ssh_opts=['-p', '2222', '-i', '/k']))
+    argv = shlex.split(hooks.dispatch('PreToolUse', BASH_INPUT)['hookSpecificOutput']['updatedInput']['command'])
+    assert argv[argv.index('-T') - 4:argv.index('-T')] == ['-p', '2222', '-i', '/k']
+    assert '-p' not in argv[argv.index('-T'):]
+    assert '1' not in argv
+
+
+def test_pre_tool_use_falls_back_to_env_ssh_opts(runtime: state.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_SSH_OPTS', '-p 2222')
+    set_redirect(runtime)
+    argv = shlex.split(hooks.dispatch('PreToolUse', BASH_INPUT)['hookSpecificOutput']['updatedInput']['command'])
+    assert argv[argv.index('-T') - 2:argv.index('-T')] == ['-p', '2222']
+
+
 def test_pre_tool_use_local_prefix_is_stripped(runtime: state.Runtime) -> None:
     set_redirect(runtime)
     payload = {'tool_name': 'Bash', 'tool_input': {'command': '  local:  git status', 'description': 'Status'}}

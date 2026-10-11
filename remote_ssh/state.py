@@ -176,7 +176,7 @@ class Runtime:
 
     @property
     def state_path(self) -> Path:
-        """Path of state.json, the connected hosts and redirect target."""
+        """Path of state.json: connected hosts, redirect target and the server's ssh options."""
         return self.dir / 'state.json'
 
     @property

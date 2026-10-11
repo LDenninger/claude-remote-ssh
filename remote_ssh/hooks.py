@@ -162,7 +162,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     stripped = command.lstrip()
     if stripped.startswith(LOCAL_PREFIX):
         return build_output('PreToolUse', updatedInput={**tool_input, 'command': stripped[len(LOCAL_PREFIX):].lstrip()})
-    extra = shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
+    #--- hooks never see the MCP server's env: use the ssh options the server saved ---
+    extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
     argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None)
     updated_input = {**tool_input, 'command': shlex.join(argv)}
     if not is_option_enabled('REDIRECT_CONFIRM'):

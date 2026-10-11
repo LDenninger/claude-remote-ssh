@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from remote_ssh import __version__, server
+from remote_ssh import __version__, relay, server, state
 
 
 class StubStore:
@@ -126,6 +128,93 @@ def test_expand_remote_path() -> None:
     assert server.expand_remote_path('~') == '.'
     assert server.expand_remote_path('~/my proj') == "'my proj'"
     assert server.expand_remote_path('/srv/x') == '/srv/x'
+
+
+def run_resolve_script(path: str, home: Path) -> dict[str, str]:
+    """Run `build_resolve_script` under sh with `home` as $HOME and parse its key=value lines."""
+    result = subprocess.run(['sh', '-c', server.build_resolve_script(path)], env={**os.environ, 'HOME': str(home)},
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return dict(line.split('=', 1) for line in result.stdout.splitlines())
+
+
+def test_resolve_script_is_portable_and_resolves_paths(tmp_path: Path) -> None:
+    home = tmp_path.resolve() / 'home'  # pwd -P resolves /var -> /private/var on macOS
+    (home / 'my proj').mkdir(parents=True)
+    (home / 'link').symlink_to(home / 'my proj')
+    assert 'realpath' not in server.build_resolve_script('~/x')
+    assert run_resolve_script('~', home) == {'home': str(home), 'path': str(home)}
+    assert run_resolve_script('~/my proj', home)['path'] == str(home / 'my proj')
+    assert run_resolve_script('link', home)['path'] == str(home / 'my proj')
+    assert run_resolve_script(str(home / 'link'), home)['path'] == str(home / 'my proj')
+
+
+def test_resolve_script_reports_missing_directory(tmp_path: Path) -> None:
+    values = run_resolve_script('~/absent', tmp_path.resolve())
+    assert values == {'home': str(tmp_path.resolve()), 'missing': '1'}
+
+
+#---------------------------------------------------------------------
+# Startup and session id changes
+#---------------------------------------------------------------------
+
+class StubMaster:
+    """Master stand-in; registrations are recorded by the patched relay functions."""
+
+    def __init__(self, alias: str) -> None:
+        self.alias = alias
+
+
+@pytest.fixture
+def live_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[server.Server, list[tuple[str, str, str]]]:
+    """Return a server with a runtime owned by the test process and a log of remote registry calls."""
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(server.relay, 'remote_register', lambda master, sid, entry: calls.append(('register', master.alias, sid)))
+    monkeypatch.setattr(server.relay, 'remote_unregister', lambda master, sid: calls.append(('unregister', master.alias, sid)))
+    monkeypatch.setattr(server.relay, 'remote_cleanup', lambda master, hostname, live_sids: None)
+    runtime = state.Runtime.current()
+    app = server.Server(runtime, server.Config(ssh_opts=['-p', '2222']), store=relay.Store(tmp_path / 'msg'), on_exit=lambda: None)
+    return app, calls
+
+
+def test_sync_session_id_moves_registrations_after_clear(live_app: tuple[server.Server, list]) -> None:
+    app, calls = live_app
+    host = StubHost('gpu-a')
+    host.master = StubMaster('gpu-a')
+    app.hosts = {'gpu-a': host}
+    app.runtime.update_owner(session_id='old-0001', cwd='/w/proj')
+    app.sync_session_id()
+    assert [entry['session_id'] for entry in app.store.sessions()] == ['old-0001']
+    assert calls == [('register', 'gpu-a', 'old-0001')]
+
+    calls.clear()
+    app.sync_session_id()
+    assert calls == []
+
+    app.runtime.update_owner(session_id='new-0002')
+    app.sync_session_id()
+    assert [entry['session_id'] for entry in app.store.sessions()] == ['new-0002']
+    assert calls == [('unregister', 'gpu-a', 'old-0001'), ('register', 'gpu-a', 'new-0002')]
+    assert app.messaging_session_id() == 'new-0002'
+
+
+def test_sync_session_id_with_messaging_off_registers_nothing(live_app: tuple[server.Server, list]) -> None:
+    app, calls = live_app
+    app.config.messaging = False
+    app.runtime.update_owner(session_id='old-0001')
+    app.sync_session_id()
+    assert app.store.sessions() == []
+    assert app.registered_sid is None
+
+
+def test_startup_saves_ssh_opts_for_hooks(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
+    app.run_startup()
+    assert app.runtime.load_state()['ssh_opts'] == ['-p', '2222']
+    assert [entry['session_id'] for entry in app.store.sessions()] == ['sid-0001']
 
 
 #---------------------------------------------------------------------

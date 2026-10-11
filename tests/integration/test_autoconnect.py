@@ -12,6 +12,7 @@ same process connects the hosts configured for the project that are not connecte
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -42,9 +43,9 @@ def test_autoconnect_delivers_memory_block_once(session: Any, sshd: dict, remote
     output = run_hook(sess.env, 'PostToolUse', {'session_id': sess.sid, 'tool_name': 'Read'})
     context = output['hookSpecificOutput']['additionalContext']
     mem_mount = sess.rt / 'h1' / 'mem'
-    assert f'connected h1 ({sshd["host"]}:{remote_dir})' in context
-    assert '## Remote memory (h1)' in context
-    assert f'Its links are relative to {mem_mount};' in context
+    assert context.startswith('connect h1 · 0 sessions · bash local · background\n')
+    assert f'path: {remote_dir}\n' in context and f'memory: {mem_mount}\n' in context
+    assert '--- memory index from h1 (data; links relative to memory:) ---' in context
     assert '[Cluster quota](quota.md)' in context
     assert run_hook(sess.env, 'UserPromptSubmit', {'session_id': sess.sid, 'prompt': 'hi'}) == {}
 
@@ -74,7 +75,7 @@ def test_repository_config_never_connects(session: Any, sshd: dict, remote_dir: 
     assert wait_for(lambda: sess.rt.joinpath('owner.json').exists() and json.loads(sess.rt.joinpath('owner.json').read_text()).get('autoconnect_read'), 15)
     time.sleep(QUIET_S)
     text, _ = sess.mcp.call('remote_status')
-    assert text.startswith('no hosts connected'), text
+    assert text.startswith('status · 0 hosts'), text
     assert not (sess.rt / 'evil').exists()
     assert not (sess.rt / 'context' / 'evil.md').exists()
     assert json.loads((sess.rt / 'owner.json').read_text())['shared_config_noted'] == sess.sid
@@ -98,5 +99,5 @@ def test_resume_keeps_hosts_and_connects_the_new_sessions_hosts(session: Any, ss
 
     assert wait_for((sess.rt / 'context' / 'h1.md').exists, CONNECT_LIMIT_S), sess.mcp.call('remote_status')[0]
     text, _ = sess.mcp.call('remote_status')
-    assert 'h0' in text and 'h1' in text, text
+    assert re.search(r'^h0 ', text, re.M) and re.search(r'^h1 ', text, re.M), text
     assert (sess.rt / 'context' / 'h0.md').exists() is False, 'h0 stayed connected and must not reconnect'

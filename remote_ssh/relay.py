@@ -338,11 +338,11 @@ def remote_unregister(master: Any, sid: str, timeout: float = REMOTE_TIMEOUT_S) 
     _run(master, f'rm -f -- {_get_remote_base()}/sessions/{shlex.quote(_check_id(sid) + ".json")}', timeout=timeout)
 
 
-def remote_sessions(master: Any) -> list[dict]:
+def remote_sessions(master: Any, timeout: float = REMOTE_TIMEOUT_S) -> list[dict]:
     """Return every session entry registered on the remote, skipping unreadable files."""
     command = f'for f in {_get_remote_base()}/sessions/*.json; do [ -f "$f" ] && cat -- "$f" && printf "\\0"; done; true'
     entries = []
-    for record in _split_nul(_run(master, command)):
+    for record in _split_nul(_run(master, command, timeout=timeout)):
         try:
             entry = json.loads(record)
         except ValueError:

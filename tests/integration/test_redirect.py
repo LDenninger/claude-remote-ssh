@@ -30,7 +30,7 @@ def test_redirect_runs_on_remote_and_local_prefix_runs_locally(session: Any, ssh
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
     assert not is_error, text
     text, is_error = sess.mcp.call('remote_mode', alias='h1')
-    assert not is_error and text.startswith('redirect on'), text
+    assert not is_error and text.startswith('mode h1 · bash redirected'), text
 
     hook_env = {key: value for key, value in sess.env.items() if key not in ('REMOTE_SSH_SSH_OPTS', 'CLAUDE_PLUGIN_OPTION_REDIRECT_CONFIRM')}
     bash_env = {key: value for key, value in os.environ.items() if key != 'SSH_CONNECTION'}
@@ -43,7 +43,7 @@ def test_redirect_runs_on_remote_and_local_prefix_runs_locally(session: Any, ssh
     #--- redirected: runs in the remote project path over ssh, exit code passes through ---
     output = pre_tool_use('echo "$SSH_CONNECTION" > where.txt; pwd >> where.txt; exit 7')
     assert output['permissionDecision'] == 'ask'
-    assert output['permissionDecisionReason'] .startswith('remote-ssh: runs on h1: echo ')
+    assert output['permissionDecisionReason'] .startswith('redirect h1 · runs on h1\ncommand: echo ')
     assert output['updatedInput']['description'] == 'test'
     result = run_bash(output['updatedInput']['command'], sess.cwd, bash_env)
     assert result.returncode == 7, result.stderr

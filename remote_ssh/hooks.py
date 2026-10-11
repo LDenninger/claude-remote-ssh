@@ -97,7 +97,7 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     import socket
     from pathlib import Path
 
-    from remote_ssh import memory, relay, state
+    from remote_ssh import fmt, memory, relay, state
 
     runtime = state.Runtime.current()
     if runtime is None:
@@ -139,15 +139,18 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
                 index_md = memory.cache_path(runtime.dir, alias).read_text(encoding='utf-8', errors='replace')
             except OSError:
                 continue
-            blocks.append(memory.render_block(alias, index_md, runtime.mem_path(alias)))
+            blocks.append(fmt.compose(fmt.head('memory', alias, 'index'), *fmt.fields(('memory', runtime.mem_path(alias))),
+                                      memory.render_block(alias, index_md)))
     #--- the server reads autoconnect.json once per process, and marks owner.json when it has ---
     if autoconnect and not owner.get('autoconnect_read'):
         aliases = ', '.join(entry['alias'] for entry in autoconnect)
-        blocks.append(f'remote-ssh: connecting {aliases} in the background. Mounts and remote memory arrive with the next prompt or tool call.')
+        blocks.append(fmt.compose(fmt.head('connect', None, f'{aliases} in the background'),
+                                  'next: wait for the mounts and remote memory, they arrive with the next prompt or tool call'))
     if note_shared:
-        blocks.append(f'remote-ssh: .claude/{" and .claude/".join(repo_config)} in this project is ignored, since a repository file must not '
-                      f'open ssh connections. Autoconnect hosts are read from {config_path}, '
-                      'as {"projects": {"<absolute project path>": {"hosts": [{"alias", "host", "path"}]}}}.')
+        blocks.append(fmt.compose(fmt.head('connect', None, 'repository config ignored'),
+                                  *fmt.fields(('reason', f'.claude/{" and .claude/".join(repo_config)} is a repository file and must not open ssh connections'),
+                                              ('next', f'put autoconnect hosts in {config_path} as '
+                                                       '{"projects": {"<absolute project path>": {"hosts": [{"alias", "host", "path"}]}}}'))))
     return build_output('SessionStart', '\n\n'.join(blocks), missing_tools_message())
 
 
@@ -196,8 +199,14 @@ def on_session_end(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def deny_redirect(reason: str) -> dict[str, Any] | None:
     """Return the PreToolUse output that blocks a Bash call the redirect cannot carry."""
-    text = f'remote-ssh: {reason}; retry, prefix the command with `local:` to run it here, or call remote_mode(null)'
-    return build_output('PreToolUse', permissionDecision='deny', permissionDecisionReason=text)
+    return build_output('PreToolUse', permissionDecision='deny', permissionDecisionReason=deny_text(reason))
+
+
+def deny_text(reason: str, *extra: tuple[str, str]) -> str:
+    """Return the deny reason shown for a redirected Bash call: `reason:`, extra fields, then `next:`."""
+    from remote_ssh import fmt
+
+    return fmt.error('redirect', None, reason, 'retry, prefix the command with local: to run it here, or call remote_mode(null)', *extra)
 
 
 def bash_deny_rules(cwd: str) -> list[tuple[str, str]]:
@@ -364,9 +373,9 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     except (OSError, ValueError) as exc:
         return deny_redirect(f'cannot read the Bash deny rules ({exc})')
     if matched is not None:
-        return build_output('PreToolUse', permissionDecision='deny',
-                            permissionDecisionReason=f'remote-ssh: denied by permission rule Bash({matched[0]}) from {matched[1]}, '
-                                                     f'which Claude Code cannot apply to the redirected command: {command[:REASON_COMMAND_CHARS]}')
+        return build_output('PreToolUse', permissionDecision='deny', permissionDecisionReason=deny_text(
+            f'permission rule Bash({matched[0]}) from {matched[1]} matches, and Claude Code cannot apply it to the redirected command',
+            ('command', command[:REASON_COMMAND_CHARS])))
     try:
         extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
         argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None,
@@ -378,7 +387,7 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not is_option_enabled('REDIRECT_CONFIRM'):
         return build_output('PreToolUse', updatedInput=updated_input)
     shown = command if len(command) <= REASON_COMMAND_CHARS else command[:REASON_COMMAND_CHARS] + '...'
-    return build_output('PreToolUse', permissionDecision='ask', permissionDecisionReason=f'remote-ssh: runs on {target}: {shown}', updatedInput=updated_input)
+    return build_output('PreToolUse', permissionDecision='ask', permissionDecisionReason=f'redirect {target} · runs on {target}\ncommand: {shown}', updatedInput=updated_input)
 
 
 def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | None:
@@ -389,9 +398,9 @@ def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | No
     blocks = runtime.claim_context() if runtime is not None else []
     session_id = payload.get('session_id')
     store = relay.Store()
-    msgs = inbox.claim_pending(store, session_id) if session_id else []
-    if msgs:
-        blocks.append(inbox.format_batch(msgs))
+    text = inbox.render_claimed(store, session_id) if session_id else ''
+    if text:
+        blocks.append(text)
     if runtime is not None and session_id and not store.has_pending(session_id):
         runtime.pending_path.unlink(missing_ok=True)
     return build_output(event, '\n\n'.join(blocks)) if blocks else None

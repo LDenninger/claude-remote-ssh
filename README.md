@@ -15,10 +15,10 @@ commands, mounts the remote project and loads its memory, and all of it ends wit
   back.
 - **Remote commands:** `remote_exec` runs one command. Redirect mode sends every `Bash` call to a host,
   and `local:` keeps a command local.
+- **Remote memory:** the remote project's `MEMORY.md` index is loaded beside your local memory.
 - **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Several hosts
   connect at once.
 - **Project mounts:** the remote project is mounted with sshfs, so Read, Edit and Write work on it.
-- **Remote memory:** the remote project's `MEMORY.md` index is loaded beside your local memory.
 - **Low overhead:** hooks start Python only when a message or redirect is pending.
 
 ## 📦 Install

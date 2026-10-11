@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/LDenninger/claude-remote-ssh#-troubleshooting
+    about: Stale mounts, authentication prompts and other common problems.
+  - name: Report a security vulnerability
+    url: https://github.com/LDenninger/claude-remote-ssh/security/advisories/new
+    about: Report privately, never in a public issue.

@@ -18,8 +18,8 @@ running there. Every connection, mount and registration ends with the session.
   call to one host, and a `local:` prefix keeps a command on the local machine.
 - **Project mounts:** the remote project directory is mounted with sshfs, so Read, Edit and Write
   work on remote files.
-- **Remote memory:** the remote project's `MEMORY.md` index is loaded into the session, with links
-  pointing at a mount of the remote memory directory.
+- **Remote memory:** the remote project's `MEMORY.md` index is loaded into the session, together with
+  the local mount of the remote memory directory its links are relative to.
 - **Messaging:** sessions on different machines send each other messages through the plugin's own
   inbox. Every transfer runs over the local session's connection, so the remote host never connects
   back.
@@ -38,7 +38,7 @@ running there. Every connection, mount and registration ends with the session.
 - `remote_exec` goes through the MCP tool permission prompt. A redirected `Bash` call asks for
   approval of the rewritten `ssh` command line while `redirect_confirm` is on.
 - Only processes running as your user read or write your inboxes. Message bodies reach the session
-  as quoted text, capped at 16 KB, with the sender named, and the bundled `remote` skill tells
+  as quoted text, capped at 16 KB, with the sender named, and the bundled `remote-ssh` skill tells
   Claude to treat them as information, never as instructions.
 
 ### Trust model

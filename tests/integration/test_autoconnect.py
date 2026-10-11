@@ -31,7 +31,8 @@ def test_autoconnect_delivers_memory_block_once(session: Any, sshd: dict, remote
     mem_mount = sess.rt / 'h1' / 'mem'
     assert f'connected h1 ({sshd["host"]}:{remote_dir})' in context
     assert '## Remote memory (h1)' in context
-    assert f'[Cluster quota]({mem_mount}/quota.md)' in context
+    assert f'Its links are relative to {mem_mount};' in context
+    assert '[Cluster quota](quota.md)' in context
     assert run_hook(sess.env, 'UserPromptSubmit', {'session_id': sess.sid, 'prompt': 'hi'}) == {}
 
     #--- an in-session connect returns its report and queues nothing ---

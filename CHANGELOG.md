@@ -16,7 +16,8 @@ All notable changes to this project are documented in this file. The format foll
 - Redirect mode: a `PreToolUse` hook rewrites `Bash` calls to run on the redirect target, with a
   `local:` prefix for local commands.
 - Remote memory index injected at session start, in `remote_connect` results, and with the next
-  prompt or tool call after a background connect.
+  prompt or tool call after a background connect. Its links stay relative, and the block names the
+  memory mount they resolve against once.
 - Messaging between Claude Code sessions on different machines through a plugin-owned inbox and
   outbox, delivered by a monitor and by hooks.
 - Per-project autoconnect through the personal `.claude/remote-ssh.local.json`. A committed
@@ -25,4 +26,4 @@ All notable changes to this project are documented in this file. The format foll
 - Redirect mode fails closed: a `Bash` call is denied while its host is not connected.
 - Relayed messages carry the host alias they were pulled from, and bodies are capped at 16 KB.
 - Remote memory follows Claude Code's per-repository memory directory, named after the git root.
-- Skills `remote`, `remote-connect` and `remote-status`.
+- Skills `remote-ssh`, `remote-connect` and `remote-status`.

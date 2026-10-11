@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 
-def test_i5_memory_rewrite_and_write_through_mount(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
+def test_i5_memory_block_and_write_through_mount(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
     (remote_memory_dir / 'MEMORY.md').write_text('# Memory\n- [Cluster quota](quota.md) is 4 GPUs\n- [Docs](https://example.com/x)\n')
     (remote_memory_dir / 'quota.md').write_text('The quota is 4 GPUs.\n')
     sess = session('a')
@@ -21,7 +21,8 @@ def test_i5_memory_rewrite_and_write_through_mount(session: Any, sshd: dict, rem
     mem_mount = sess.rt / 'h1' / 'mem'
     assert f'memory: {mem_mount}' in text
     assert '## Remote memory (h1)' in text
-    assert f'[Cluster quota]({mem_mount}/quota.md)' in text
+    assert f'Its links are relative to {mem_mount};' in text
+    assert '[Cluster quota](quota.md)' in text
     assert '[Docs](https://example.com/x)' in text
 
     #--- the rewritten link resolves through the mount, and writes reach the remote ---
@@ -44,6 +45,6 @@ def test_memory_of_a_repository_subdirectory_is_the_repository_memory(session: A
     sess = session('a')
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir / 'src'))
     assert not is_error, text
-    assert f'[Repo fact]({sess.rt / "h1" / "mem"}/fact.md)' in text, text
+    assert f'Its links are relative to {sess.rt / "h1" / "mem"};' in text and '[Repo fact](fact.md)' in text, text
     text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
     assert not is_error, text

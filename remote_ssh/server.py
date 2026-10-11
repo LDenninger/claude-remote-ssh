@@ -566,8 +566,9 @@ class Server:
             return error, True
         timeout_s = int(args.get('timeout_s') or 600)
         stdout, stderr, code = session.master.exec(args['command'], args.get('cwd') or session.abs_path, timeout=timeout_s)
-        text = f'exit {code} on {session.alias}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}'
-        return text, code != 0
+        #--- an empty stream gets no section, which keeps short results short ---
+        sections = [f'--- {name} ---\n{text}' for name, text in (('stdout', stdout), ('stderr', stderr)) if text]
+        return '\n'.join([f'exit {code} on {session.alias}', *sections]), code != 0
 
     def tool_remote_mode(self, args: dict[str, Any]) -> tuple[str, bool]:
         """Set or clear the Bash redirect target."""
@@ -902,11 +903,15 @@ class Server:
     #---------------------------------------------------------------------
 
     def __connected(self, alias: str) -> tuple[HostSession | None, str]:
-        """Return the connected session for `alias`, or None and an error line."""
+        """Return the connected session for `alias`, or None and an error line.
+
+        The error for an unknown alias names the connected aliases.
+        """
         with self.lock:
             session = self.hosts.get(alias)
+            connected = ', '.join(sorted(self.hosts)) or 'none'
         if session is None:
-            return None, f'{alias} is not connected'
+            return None, f'{alias} is not connected. Connected hosts: {connected}. Ask the user for the ssh host of {alias}, then call remote_connect.'
         if session.status != 'connected':
             return None, f'{alias} is {session.status}: {session.error or "try again shortly"}'
         return session, ''
@@ -999,7 +1004,7 @@ class Server:
         return []
 
     def __connect_report(self, session: HostSession, warnings: list[str]) -> str:
-        """Build the `remote_connect` result: mounts, remote sessions, memory block."""
+        """Build the `remote_connect` result: mounts, remote sessions, where Bash runs, memory block."""
         lines = [f'connected {session.alias} ({session.host}:{session.abs_path})']
         lines.append(f'files: {session.fs_dir if session.mounted_fs else "not mounted"}')
         lines.append(f'memory: {session.mem_dir if session.mounted_mem else "not mounted"}')
@@ -1010,6 +1015,11 @@ class Server:
                 lines.append(f'sessions on {session.alias}: {names or "none"}')
             except Exception as exc:
                 lines.append(f'sessions on {session.alias}: unavailable ({exc})')
+        if self.runtime.load_state().get('redirect') == session.alias:
+            lines.append(f'Bash runs on {session.alias} (redirect on).')
+        else:
+            lines.append(f'Bash runs locally. remote_exec runs one command on {session.alias}, '
+                         f'remote_mode("{session.alias}") sends every later Bash call there.')
         lines.extend(f'warning: {warning}' for warning in warnings)
         lines.extend(['', session.memory_block()])
         return '\n'.join(lines)

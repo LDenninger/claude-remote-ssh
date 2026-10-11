@@ -464,6 +464,36 @@ def test_connect_rejects_host_that_ssh_would_parse_as_option(live_app: tuple[ser
     assert app.hosts == {}
 
 
+def test_unknown_alias_error_names_connected_aliases(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.hosts['gpu-a'] = StubHost('gpu-a')
+    text, is_error = app.call_tool('remote_exec', {'alias': 'gpu-b', 'command': 'true'})
+    assert is_error
+    assert text == 'gpu-b is not connected. Connected hosts: gpu-a. Ask the user for the ssh host of gpu-b, then call remote_connect.'
+
+
+def test_exec_result_omits_empty_streams(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    host = StubHost('gpu-a')
+    host.abs_path = '/p'
+    outputs = iter([('out\n', '', 0), ('', 'err\n', 2)])
+    host.master = SimpleNamespace(exec=lambda command, cwd, timeout: next(outputs))
+    app.hosts['gpu-a'] = host
+    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 0 on gpu-a\n--- stdout ---\nout\n', False)
+    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 2 on gpu-a\n--- stderr ---\nerr\n', True)
+
+
+def test_connect_report_says_where_bash_runs(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.config.messaging = False
+    host = SimpleNamespace(alias='gpu-a', host='h', abs_path='/p', fs_dir=Path('/fs'), mounted_fs=True, mem_dir=Path('/mem'), mounted_mem=False,
+                           memory_block=lambda: '## Remote memory (gpu-a)')
+    report = app._Server__connect_report(host, [])
+    assert 'Bash runs locally. remote_exec runs one command on gpu-a, remote_mode("gpu-a") sends every later Bash call there.' in report
+    app.runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
+    assert 'Bash runs on gpu-a (redirect on).' in app._Server__connect_report(host, [])
+
+
 def test_send_rejects_oversized_body(live_app: tuple[server.Server, list]) -> None:
     app, _ = live_app
     app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')

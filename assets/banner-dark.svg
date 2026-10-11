@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="604" height="96" viewBox="0 0 604 96" role="img" aria-label="claude-remote-ssh">
-  <g fill="none" stroke="#E6EDF3" stroke-width="4">
+  <g fill="none" stroke="#58A6FF" stroke-width="4">
     <circle cx="20" cy="48" r="12"/>
     <circle cx="84" cy="48" r="12"/>
     <line x1="32" y1="48" x2="72" y2="48" stroke-dasharray="6 5"/>
   </g>
-  <text x="118" y="61" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="38" font-weight="600" fill="#E6EDF3">claude-remote-ssh</text>
+  <text x="118" y="61" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="38" font-weight="600" fill="#E6EDF3">claude-<tspan fill="#58A6FF">remote</tspan>-ssh</text>
 </svg>

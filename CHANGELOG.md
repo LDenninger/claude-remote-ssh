@@ -6,6 +6,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Fixed
+
+- The MCP server is declared in `.claude-plugin/plugin.json` instead of a root `.mcp.json`, so a
+  session started inside the plugin repository no longer loads it as a broken project server.
+
 ### Changed
 
 - Every tool result and injected message follows one fixed output format: a first line `<tool> <host> · <facts>`,

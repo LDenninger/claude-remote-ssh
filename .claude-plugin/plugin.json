@@ -49,5 +49,18 @@
     }
   },
   "privacyPolicyUrl": "https://github.com/LDenninger/claude-remote-ssh/blob/master/PRIVACY.md",
-  "supportUrl": "https://github.com/LDenninger/claude-remote-ssh/issues"
+  "supportUrl": "https://github.com/LDenninger/claude-remote-ssh/issues",
+  "mcpServers": {
+    "ssh": {
+      "command": "python3",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/server.py"
+      ],
+      "env": {
+        "REMOTE_SSH_MESSAGING": "${user_config.messaging}",
+        "REMOTE_SSH_POLL_INTERVAL": "${user_config.poll_interval_s}",
+        "REMOTE_SSH_SSHFS_OPTIONS": "${user_config.sshfs_options}"
+      }
+    }
+  }
 }

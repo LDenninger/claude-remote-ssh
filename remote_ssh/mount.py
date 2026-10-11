@@ -87,11 +87,14 @@ DEAD_MOUNT_ERRNOS = {errno.ENOTCONN, errno.EIO, errno.ENOENT}
 def is_mounted(mountpoint: Path) -> bool:
     """Return whether a filesystem is mounted at `mountpoint`, including a dead FUSE mount.
 
-    `os.path.ismount` reports False when `lstat` fails, which is exactly what a FUSE mount does once
-    its connection or its remote root is gone. Linux therefore reads the kernel mount table. Other
-    systems treat the errors a dead mount raises as mounted, but only when the parent directory still
-    lists the mountpoint. The kernel table holds resolved paths, so the mountpoint's parent is
-    resolved too. The mountpoint itself is never resolved, since a hung mount would block that call.
+    Args:
+        mountpoint: Local mountpoint to check. Only its parent is resolved, since resolving a hung
+            mount itself would block.
+
+    Returns:
+        True if the kernel mount table lists `mountpoint` (Linux), or, elsewhere, if `lstat` fails
+        with a dead-mount error while the parent still lists it. `os.path.ismount` alone misses dead
+        FUSE mounts because their `lstat` fails.
     """
     if MOUNTINFO.exists():
         absolute = os.path.abspath(mountpoint)

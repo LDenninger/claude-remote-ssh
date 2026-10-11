@@ -566,7 +566,6 @@ class Server:
             return error, True
         timeout_s = int(args.get('timeout_s') or 600)
         stdout, stderr, code = session.master.exec(args['command'], args.get('cwd') or session.abs_path, timeout=timeout_s)
-        #--- an empty stream gets no section, which keeps short results short ---
         sections = [f'--- {name} ---\n{text}' for name, text in (('stdout', stdout), ('stderr', stderr)) if text]
         return '\n'.join([f'exit {code} on {session.alias}', *sections]), code != 0
 
@@ -722,7 +721,6 @@ class Server:
         """Sweep stale runtime dirs, recover the previous instance's hosts and autoconnect."""
         try:
             self.runtime.update_owner(server_pid=os.getpid())
-            #--- hooks run without the server's env: they read the ssh options from state.json ---
             self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, ssh_opts=self.config.ssh_opts))
             self.sweep()
             targets = self.__recover_previous()
@@ -771,7 +769,6 @@ class Server:
             sessions = list(self.hosts.values())
         store = self.__messaging_store()
         session_id = self.messaging_session_id()
-        #--- one thread per host: a frozen host never delays another host or the next shutdown check ---
         for session in sessions:
             if not session.lock.acquire(blocking=False):
                 continue
@@ -930,7 +927,6 @@ class Server:
         store = self.__messaging_store()
 
         def disconnect(session: HostSession) -> None:
-            #--- a busy host is likely stuck on the remote: skip its messaging steps, a reconnect releases what it brings up ---
             locked = session.lock.acquire(timeout=TEARDOWN_LOCK_WAIT_S)
             if not locked:
                 LOG.warning('%s: lifecycle step still running, disconnecting without messaging cleanup', session.alias)

@@ -223,7 +223,6 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     if status != 'connected':
         return deny_redirect(f'{target} is {status or "not connected"}')
     try:
-        #--- hooks never see the MCP server's env: use the ssh options the server saved ---
         extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
         argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None)
     except Exception as exc:
@@ -246,7 +245,6 @@ def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | No
     msgs = inbox.claim_pending(store, session_id) if session_id else []
     if msgs:
         blocks.append(inbox.format_batch(msgs))
-    #--- the server sets the flag again on its next poll if a message arrived meanwhile ---
     if runtime is not None and session_id and not store.has_pending(session_id):
         runtime.pending_path.unlink(missing_ok=True)
     return build_output(event, '\n\n'.join(blocks)) if blocks else None

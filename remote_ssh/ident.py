@@ -45,7 +45,6 @@ def _read_stat_fields(pid: int) -> list[str] | None:
         stat = Path(f'/proc/{pid}/stat').read_text()
     except OSError:
         return None
-    # The command name (field 2) may contain spaces and parentheses, so split after the last ')'.
     return stat[stat.rfind(')') + 2:].split()
 
 

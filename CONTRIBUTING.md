@@ -29,3 +29,13 @@ claude plugin validate . --strict
 - Keep the token footprint small. Tool and skill descriptions are loaded into every session.
 - Add a test that fails without your change.
 - Write commit messages in the imperative mood, one concern per commit.
+
+## Releasing
+
+1. Set the new version in `.claude-plugin/plugin.json`, `pyproject.toml` and `remote_ssh/__init__.py`.
+2. Rename the `Unreleased` heading in `CHANGELOG.md` to `## [x.y.z] - YYYY-MM-DD`.
+3. Commit, then tag and push: `git tag vx.y.z && git push origin main vx.y.z`.
+
+The release workflow reruns CI, refuses a tag that does not match the version or has no dated
+changelog section, and publishes a GitHub release with the plugin archive, its SHA-256 sum and the
+changelog section as notes. Users of the marketplace pick it up with `claude plugin update`.

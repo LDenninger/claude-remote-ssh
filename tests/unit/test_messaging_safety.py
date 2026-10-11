@@ -118,8 +118,8 @@ def test_remote_inbox_tool_claims_and_shows_everything(app: server.Server) -> No
     for ii in range(5):
         app.store.deliver({**_msg('x' * 3000, to='sid-0001'), 'id': f'{1000 + ii}-0000000{ii}'})
     text, _ = app.call_tool('remote_inbox', {})
-    assert text.startswith('inbox · 5 new · 5 delivered\n--- new ---\n') and app.store.pending('sid-0001') == []
-    assert text.count('x' * 3000) == 10
+    assert text.startswith('inbox · 5 new · 0 delivered\n--- new ---\n') and app.store.pending('sid-0001') == []
+    assert text.count('x' * 3000) == 5
 
 
 #---------------------------------------------------------------------

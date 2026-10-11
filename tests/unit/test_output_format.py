@@ -238,9 +238,13 @@ def test_inbox_shape(app: server.Server) -> None:
     app.store.deliver(msg)
     text, is_error = app.call_tool('remote_inbox', {})
     assert not is_error
-    assert text == ('inbox · 1 new · 1 delivered\n--- new ---\ngpu/train-befb  02:56:01Z\n> Finished at epoch 40.\n'
-                    '--- delivered ---\ngpu/train-befb  02:56:01Z\n> Finished at epoch 40.')
+    assert text == 'inbox · 1 new · 0 delivered\n--- new ---\ngpu/train-befb  02:56:01Z\n> Finished at epoch 40.'
     assert app.call_tool('remote_inbox', {})[0].startswith('inbox · 0 new · 1 delivered\n--- delivered ---\n')
+    newer = {**relay.new_message('peer-0001', 'other', 'far', 'sid-0001', 'second'), 'relayed_from': 'gpu', 'id': '9999999999999-0000ffff'}
+    app.store.deliver(newer)
+    text, _ = app.call_tool('remote_inbox', {})
+    assert text.startswith('inbox · 1 new · 1 delivered\n--- new ---\n') and blocks(text) == ['new', 'delivered']
+    assert text.count('> second') == 1 and text.count('> Finished at epoch 40.') == 1
 
 
 #---------------------------------------------------------------------

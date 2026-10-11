@@ -669,8 +669,8 @@ class Server:
         own = self.session_id()
         if not own:
             return fmt.error('inbox', None, 'own session id unknown (SessionStart hook has not run)', 'submit another prompt, then retry'), True
-        new_msgs = inbox.claim_pending(self.store, own, limit=None)
         delivered = self.store.read_messages(own)
+        new_msgs = inbox.claim_pending(self.store, own, limit=None)
         return fmt.compose(
             fmt.head('inbox', None, f'{len(new_msgs)} new', f'{len(delivered)} delivered'),
             fmt.block('new', '\n'.join(inbox.format_row(msg) for msg in new_msgs)),

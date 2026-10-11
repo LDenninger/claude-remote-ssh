@@ -1,6 +1,6 @@
 ---
 name: remote-ssh
-description: Use when a task involves a remote machine reached over SSH (connecting it, running commands, editing or copying its files, its remote memory), or when a "Remote memory (<alias>)" block or "[remote-ssh] message from" line appears.
+description: Use when a task involves a remote machine reached over SSH (connecting it, running commands, editing or copying its files, its remote memory), or when a `memory <alias> · index` block or a `message <host> · <session>` block appears.
 user-invocable: false
 ---
 

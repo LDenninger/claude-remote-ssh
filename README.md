@@ -1,7 +1,7 @@
 <h1>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg">
-    <img src="assets/mark-light.svg" alt="" width="128" align="right">
+    <img src="assets/mark-light.svg" alt="" width="144" align="right">
   </picture>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/name-dark.svg">

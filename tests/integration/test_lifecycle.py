@@ -47,7 +47,7 @@ def test_i1_connect_exec_mount_disconnect(session: Any, sshd: dict, remote_dir: 
 
     #--- remote_exec runs in the project path and passes the exit code through ---
     text, is_error = sess.mcp.call('remote_exec', alias='h1', command='pwd; echo out; echo err >&2; exit 3')
-    assert is_error
+    assert not is_error
     assert text.startswith('exit 3 on h1')
     assert f'{remote_dir}\nout' in text and 'err' in text
     text, is_error = sess.mcp.call('remote_exec', alias='h1', command='true')

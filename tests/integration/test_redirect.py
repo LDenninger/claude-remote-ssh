@@ -37,7 +37,7 @@ def test_redirect_runs_on_remote_and_local_prefix_runs_locally(session: Any, ssh
     #--- redirected: runs in the remote project path over ssh, exit code passes through ---
     output = pre_tool_use('echo "$SSH_CONNECTION" > where.txt; pwd >> where.txt; exit 7')
     assert output['permissionDecision'] == 'ask'
-    assert output['permissionDecisionReason'] == 'remote-ssh: runs on h1'
+    assert output['permissionDecisionReason'] .startswith('remote-ssh: runs on h1: echo ')
     assert output['updatedInput']['description'] == 'test'
     result = run_bash(output['updatedInput']['command'], sess.cwd, bash_env)
     assert result.returncode == 7, result.stderr

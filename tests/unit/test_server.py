@@ -480,7 +480,7 @@ def test_exec_result_omits_empty_streams(live_app: tuple[server.Server, list]) -
     host.master = SimpleNamespace(exec=lambda command, cwd, timeout: next(outputs))
     app.hosts['gpu-a'] = host
     assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 0 on gpu-a\n--- stdout ---\nout\n', False)
-    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 2 on gpu-a\n--- stderr ---\nerr\n', True)
+    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 2 on gpu-a\n--- stderr ---\nerr\n', False)
 
 
 def test_connect_report_says_where_bash_runs(live_app: tuple[server.Server, list]) -> None:

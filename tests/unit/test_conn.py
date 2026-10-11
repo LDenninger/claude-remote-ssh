@@ -55,8 +55,8 @@ def test_remote_shell_cwd_failure_skips_command(tmp_path: Path) -> None:
 
 def test_exec_argv_layout() -> None:
     argv = exec_argv(Path('/run/c'), 'gpu', 'ls', '/srv', extra=['-p', '2222'])
-    assert argv == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-p', '2222', '-T', '--', 'gpu', remote_shell('ls', '/srv')]
-    assert exec_argv(Path('/run/c'), 'gpu', 'ls', None)[:7] == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-T', '--']
+    assert argv == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-p', '2222', '-T', '--', 'gpu', remote_shell('ls', '/srv')]
+    assert exec_argv(Path('/run/c'), 'gpu', 'ls', None)[:9] == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-T', '--']
 
 
 def test_master_argv_end_options_before_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,8 +143,8 @@ def test_tail() -> None:
     assert tail('abcdef', n=3) == '[truncated]\ndef'
 
 
-def test_ssh_command() -> None:
-    assert Master('a', 'h', Path('/run/c')).ssh_command() == 'ssh -S /run/c -o BatchMode=yes'
+def test_ssh_argv() -> None:
+    assert Master('a', 'h', Path('/run/c')).ssh_argv() == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no']
 
 
 def test_start_fails_fast_on_refused_port(tmp_path: Path) -> None:

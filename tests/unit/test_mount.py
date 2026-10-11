@@ -35,7 +35,7 @@ def test_sshfs_argv_linux(mount_mod: types.ModuleType, monkeypatch: pytest.Monke
     monkeypatch.setattr(mount_mod.platform, 'IS_MAC', False)
     master = Master('gpu', 'user@gpu', Path('/run/c'))
     assert mount_mod.sshfs_argv(master, '/srv/p', Path('/run/fs')) == [
-        'sshfs', 'user@gpu:/srv/p', '/run/fs', '-o', 'ssh_command=ssh -S /run/c -o BatchMode=yes', '-o', 'reconnect,ServerAliveInterval=15',
+        'sshfs', 'user@gpu:/srv/p', '/run/fs', '-o', 'ssh_command=ssh -S /run/c -o BatchMode=yes -o ControlMaster=no', '-o', 'reconnect,ServerAliveInterval=15',
     ]
 
 
@@ -44,7 +44,7 @@ def test_sshfs_argv_mac_extra(mount_mod: types.ModuleType, monkeypatch: pytest.M
     master = Master('gpu', 'gpu', Path('/run/c'), ['-p', '2222', '-i', '/k'])
     argv = mount_mod.sshfs_argv(master, '/srv/p', Path('/run/fs'), extra_opts='cache=no')
     assert argv[3:] == [
-        '-o', 'ssh_command=ssh -S /run/c -o BatchMode=yes -p 2222 -i /k', '-o', 'reconnect,ServerAliveInterval=15',
+        '-o', 'ssh_command=ssh -S /run/c -o BatchMode=yes -o ControlMaster=no -p 2222 -i /k', '-o', 'reconnect,ServerAliveInterval=15',
         '-o', 'volname=gpu,noappledouble', '-o', 'cache=no',
     ]
 

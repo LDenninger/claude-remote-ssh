@@ -27,7 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "e=PreToolUse r=\"${CLAUDE_PLUGIN_ROOT}\"; . \"$r/scripts/gate.sh\""
+            "command": "e=PreToolUse r=\"${CLAUDE_PLUGIN_ROOT}\"; . \"$r/scripts/gate.sh\"",
+            "onFailure": "block"
           }
         ]
       }

@@ -10,7 +10,6 @@ from __future__ import annotations
 import errno
 import os
 import re
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -26,6 +25,31 @@ class MountError(Exception):
 # Mounting
 #---------------------------------------------------------------------
 
+def ssh_command_option(master: Master) -> str:
+    """Return the sshfs `ssh_command` value that runs ssh through the master.
+
+    sshfs splits the value on spaces and honours backslash escapes, not shell quoting, and a
+    comma would end the enclosing `-o` value. Spaces and backslashes are therefore escaped
+    with a backslash.
+
+    Args:
+        master: Running master whose ssh argv is joined.
+
+    Returns:
+        The escaped command line.
+
+    Raises:
+        MountError: An argument contains a comma, which sshfs cannot carry in `ssh_command`.
+    """
+    words = []
+    for word in master.ssh_argv():
+        if ',' in word:
+            raise MountError(f'ssh argument {word!r} contains a comma, which sshfs cannot pass in ssh_command; '
+                             'use a path or option without one')
+        words.append(re.sub(r'([ \\])', r'\\\1', word))
+    return ' '.join(words)
+
+
 def sshfs_argv(master: Master, remote_path: str, mountpoint: Path, extra_opts: str = '') -> list[str]:
     """Build the sshfs argv that mounts a remote directory through the master.
 
@@ -37,10 +61,11 @@ def sshfs_argv(master: Master, remote_path: str, mountpoint: Path, extra_opts: s
 
     Returns:
         The sshfs argv.
+
+    Raises:
+        MountError: The ssh arguments cannot be expressed in `ssh_command`, see `ssh_command_option`.
     """
-    ssh_command = master.ssh_command()
-    if master.extra:
-        ssh_command += ' ' + shlex.join(master.extra)
+    ssh_command = ssh_command_option(master)
     argv = ['sshfs', f'{master.host}:{remote_path}', str(mountpoint), '-o', f'ssh_command={ssh_command}', '-o', 'reconnect,ServerAliveInterval=15']
     if platform.IS_MAC:
         argv += ['-o', f'volname={master.alias},noappledouble']

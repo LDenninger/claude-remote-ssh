@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -21,6 +22,15 @@ AUTOCONNECT_FILE = 'autoconnect.json'
 REPO_CONFIG_FILES = ('remote-ssh.json', 'remote-ssh.local.json')
 KEEP_REASONS = ('clear', 'resume')
 MISSING_TOOLS_PERIOD_S = 86400
+REASON_COMMAND_CHARS = 300
+DEFAULT_BASH_TIMEOUT_S = 120
+MAX_BASH_TIMEOUT_S = 600
+#--- command separators, subshell and substitution openers/closers: splitting at all of them,
+#--- quoted or not, can only produce more segments and so more deny matches ---
+SEGMENT_SPLIT = re.compile(r'&&|\|\||\|&|[;|&\n`()]|\$\(|\$\{|\{|\}')
+#--- shell keywords and wrappers that Claude Code strips before it matches a Bash rule ---
+LEADING_WORDS = {'if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'time', 'command', 'builtin', 'noglob', 'nohup', 'nice', 'timeout', 'stdbuf', 'xargs', 'exec'}
+ASSIGNMENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=\S*$')
 
 
 #---------------------------------------------------------------------
@@ -190,12 +200,134 @@ def deny_redirect(reason: str) -> dict[str, Any] | None:
     return build_output('PreToolUse', permissionDecision='deny', permissionDecisionReason=text)
 
 
+def bash_deny_rules(cwd: str) -> list[tuple[str, str]]:
+    """Return the `Bash(<pattern>)` deny rules of the user and project settings.
+
+    Reads `permissions.deny` of `<config dir>/settings.json` (`CLAUDE_CONFIG_DIR`, else
+    `~/.claude`), `<cwd>/.claude/settings.json` and `<cwd>/.claude/settings.local.json`.
+
+    Args:
+        cwd: Project directory of the session.
+
+    Returns:
+        `(pattern, settings file)` pairs. A bare `Bash` rule is not listed: it removes the tool,
+        so this hook never runs.
+
+    Raises:
+        OSError: A settings file exists but cannot be read.
+        ValueError: A settings file exists but is not a JSON object.
+    """
+    config_dir = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.join(os.path.expanduser('~'), '.claude')
+    files = [os.path.join(config_dir, 'settings.json')]
+    if cwd:
+        files += [os.path.join(cwd, '.claude', name) for name in ('settings.json', 'settings.local.json')]
+    rules = []
+    for path in files:
+        try:
+            with open(path, encoding='utf-8') as handle:
+                settings = json.load(handle)
+        except FileNotFoundError:
+            continue
+        if not isinstance(settings, dict):
+            raise ValueError(f'{path} is not a JSON object')
+        permissions = settings.get('permissions')
+        deny = permissions.get('deny') if isinstance(permissions, dict) else None
+        for rule in deny if isinstance(deny, list) else []:
+            if isinstance(rule, str) and rule.startswith('Bash(') and rule.endswith(')'):
+                rules.append((rule[5:-1], path))
+    return rules
+
+
+def command_segments(command: str) -> list[str]:
+    """Split a shell command into the simple commands a deny rule must be checked against.
+
+    Splits at `; && || | |& &`, newlines, backticks, parentheses and braces, whether or not
+    they are quoted, so a doubtful parse yields extra segments and never hides one. Each segment
+    is returned as written and again without leading keywords, wrappers (`timeout 5`, `nohup`,
+    `FOO=1`), quotes and backslashes, and with its program reduced to a basename.
+
+    Args:
+        command: Bash command as Claude wrote it.
+
+    Returns:
+        The whole command plus every segment variant, deduplicated, in order.
+    """
+    found = {command.strip(): None}
+    for raw in SEGMENT_SPLIT.split(command):
+        segment = ' '.join(raw.split())
+        if not segment:
+            continue
+        found[segment] = None
+        words = re.sub(r'[\'"\\]', '', segment).split()
+        while words and (words[0] in LEADING_WORDS or ASSIGNMENT.match(words[0]) or re.fullmatch(r'-?\d+[smhd]?', words[0]) or words[0].startswith('-')):
+            words.pop(0)
+        if words:
+            words[0] = words[0].rsplit('/', 1)[-1] or words[0]
+            found[' '.join(words)] = None
+    return list(found)
+
+
+def rule_matches(pattern: str, segment: str) -> bool:
+    """Return whether a Bash permission pattern matches one command.
+
+    Follows the permission rule syntax: no `*` is an exact match, `*` matches any text, a
+    trailing ` *` or `:*` also matches the bare command, and the space before it is part of the
+    rule.
+
+    Args:
+        pattern: Text between `Bash(` and `)`.
+        segment: Command to test.
+    """
+    if pattern.endswith(':*'):
+        pattern = pattern[:-2] + ' *'
+    if pattern == '*':
+        return True
+    if pattern.endswith(' *') and pattern.count('*') == 1:
+        head = pattern[:-2]
+        return segment == head or segment.startswith(head + ' ')
+    return re.fullmatch('.*'.join(re.escape(part) for part in pattern.split('*')), segment, re.DOTALL) is not None
+
+
+def matching_deny_rule(command: str, cwd: str) -> tuple[str, str] | None:
+    """Return the first `(pattern, settings file)` deny rule that matches any part of a command."""
+    rules = bash_deny_rules(cwd)
+    if not rules:
+        return None
+    segments = command_segments(command)
+    for pattern, path in rules:
+        if any(rule_matches(pattern, segment) for segment in segments):
+            return pattern, path
+    return None
+
+
+def bash_timeout_s(tool_input: dict[str, Any]) -> int:
+    """Return the remote time limit in seconds for a Bash call.
+
+    Args:
+        tool_input: Bash tool input, whose `timeout` is in milliseconds.
+
+    Returns:
+        The timeout rounded up to whole seconds and capped at `MAX_BASH_TIMEOUT_S`, or
+        `DEFAULT_BASH_TIMEOUT_S` when absent or not a positive number.
+    """
+    value = tool_input.get('timeout')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return DEFAULT_BASH_TIMEOUT_S
+    return min(MAX_BASH_TIMEOUT_S, max(1, -(-int(value) // 1000)))
+
+
 def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Rewrite a Bash call into an ssh call on the redirect target.
 
     Fails closed: while a redirect target is set, a Bash call that cannot reach it is denied,
-    never run locally. That covers a target that is not `connected`, an unreadable state.json
-    and any error while building the rewrite. A `local:` prefix always runs locally.
+    never run locally. That covers a target that is not `connected`, an unreadable state.json,
+    a redirect flag whose runtime cannot be found and any error while building the rewrite. A
+    `local:` prefix always runs locally.
+
+    Claude Code matches permission rules against the rewritten ssh command, so the user's Bash
+    deny rules would never match the original. The hook therefore checks them against the
+    original command and denies on a match, and it shows the original command in the approval
+    prompt.
     """
     if payload.get('tool_name') != 'Bash':
         return None
@@ -206,6 +338,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
 
     runtime = state.Runtime.current()
     if runtime is None:
+        if any(state.runtime_base().glob('*/redirect-on')):
+            return deny_redirect('redirect is on but the owning Claude process was not found')
         return None
     try:
         saved = runtime.load_state(strict=True)
@@ -226,15 +360,25 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     if status != 'connected':
         return deny_redirect(f'{target} is {status or "not connected"}')
     try:
+        matched = matching_deny_rule(command, payload.get('cwd') or '')
+    except (OSError, ValueError) as exc:
+        return deny_redirect(f'cannot read the Bash deny rules ({exc})')
+    if matched is not None:
+        return build_output('PreToolUse', permissionDecision='deny',
+                            permissionDecisionReason=f'remote-ssh: denied by permission rule Bash({matched[0]}) from {matched[1]}, '
+                                                     f'which Claude Code cannot apply to the redirected command: {command[:REASON_COMMAND_CHARS]}')
+    try:
         extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
-        argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None)
+        argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None,
+                         remote_timeout=bash_timeout_s(tool_input))
     except Exception as exc:
         sys.stderr.write(f'remote-ssh: {exc!r}\n')
         return deny_redirect(f'cannot build the command for {target} ({exc})')
     updated_input = {**tool_input, 'command': shlex.join(argv)}
     if not is_option_enabled('REDIRECT_CONFIRM'):
         return build_output('PreToolUse', updatedInput=updated_input)
-    return build_output('PreToolUse', permissionDecision='ask', permissionDecisionReason=f'remote-ssh: runs on {target}', updatedInput=updated_input)
+    shown = command if len(command) <= REASON_COMMAND_CHARS else command[:REASON_COMMAND_CHARS] + '...'
+    return build_output('PreToolUse', permissionDecision='ask', permissionDecisionReason=f'remote-ssh: runs on {target}: {shown}', updatedInput=updated_input)
 
 
 def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | None:

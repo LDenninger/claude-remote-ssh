@@ -117,7 +117,7 @@ TOOLS: list[dict[str, Any]] = [
                 'alias': ALIAS_SCHEMA,
                 'command': {'type': 'string'},
                 'cwd': {'type': 'string', 'description': 'Remote dir, default the project dir.'},
-                'timeout_s': {'type': 'integer', 'minimum': 1, 'default': 600},
+                'timeout_s': {'type': 'integer', 'minimum': 1, 'maximum': 3600, 'default': 600},
             },
             'required': ['alias', 'command'],
         },
@@ -582,14 +582,21 @@ class Server:
         return '\n'.join([status, *lines]), False
 
     def tool_remote_exec(self, args: dict[str, Any]) -> tuple[str, bool]:
-        """Run `args.command` on `args.alias`."""
+        """Run `args.command` on `args.alias`.
+
+        `timeout_s` must be an integer in 1..3600. The output is returned for every exit code, and
+        only an exit of 124 or more (timeout, signal, ssh failure 255) sets the error flag, since
+        a plain non-zero exit such as an empty `grep` is a normal result.
+        """
+        timeout_s = 600 if args.get('timeout_s') is None else args['timeout_s']
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, int) or not 1 <= timeout_s <= 3600:
+            return f'remote_exec failed: timeout_s must be an integer from 1 to 3600, got {timeout_s!r}', True
         session, error = self.__connected(args['alias'])
         if session is None:
             return error, True
-        timeout_s = int(args.get('timeout_s') or 600)
         stdout, stderr, code = session.master.exec(args['command'], args.get('cwd') or session.abs_path, timeout=timeout_s)
         sections = [f'--- {name} ---\n{text}' for name, text in (('stdout', stdout), ('stderr', stderr)) if text]
-        return '\n'.join([f'exit {code} on {session.alias}', *sections]), code != 0
+        return '\n'.join([f'exit {code} on {session.alias}', *sections]), code >= 124
 
     def tool_remote_mode(self, args: dict[str, Any]) -> tuple[str, bool]:
         """Set or clear the Bash redirect target."""

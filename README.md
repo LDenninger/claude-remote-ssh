@@ -1,4 +1,9 @@
-# claude-remote-ssh
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="100%">
+  </picture>
+</h1>
 
 [![CI](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 

@@ -64,14 +64,23 @@ def remote_shell(command: str, cwd: str | None, login: bool = True) -> str:
 
 
 def with_remote_timeout(remote: str, seconds: int) -> str:
-    """Wrap a remote command line so the remote `timeout` ends it after `seconds`.
+    """Wrap a remote command line so the remote host ends it after `seconds`.
 
     Killing the local ssh client leaves the remote command running, so the limit is enforced
-    on the remote. GNU `timeout` signals the command's whole process group, and `KILL_AFTER_S`
-    later sends SIGKILL. A remote without `timeout` runs the command unlimited.
+    on the remote. GNU `timeout` is used where it exists. Elsewhere, as on stock macOS, a bash
+    watchdog runs the command in its own process group (bash honours `set -m` without a tty,
+    dash does not), sends SIGTERM to the group at the limit and SIGKILL `KILL_AFTER_S` later.
+    Both paths exit with 124 on timeout.
     """
-    inner = 'if command -v timeout >/dev/null 2>&1; then exec timeout -k ' + str(KILL_AFTER_S) + ' "$0" sh -c "$1"; fi; exec sh -c "$1"'
-    return f'sh -c {shlex.quote(inner)} {int(seconds)} {shlex.quote(remote)}'
+    kill_after = str(KILL_AFTER_S)
+    inner = (
+        'if command -v timeout >/dev/null 2>&1; then exec timeout -k ' + kill_after + ' "$0" sh -c "$1"; fi; '
+        'set -m; started=$(date +%s); sh -c "$1" & pid=$!; '
+        '( sleep "$0"; kill -TERM -$pid 2>/dev/null; sleep ' + kill_after + '; kill -KILL -$pid 2>/dev/null ) >/dev/null 2>&1 & watchdog=$!; '
+        'wait $pid; rc=$?; kill -TERM -$watchdog 2>/dev/null; '
+        'if [ $rc -gt 128 ] && [ $(( $(date +%s) - started )) -ge "$0" ]; then exit 124; fi; exit $rc'
+    )
+    return f'bash -c {shlex.quote(inner)} {int(seconds)} {shlex.quote(remote)}'
 
 
 def exec_argv(ctl: Path, host: str, command: str, cwd: str | None, extra: list[str] | None = None,

@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The MCP server is named `ssh`, so the chat shows `plugin:remote-ssh:ssh` instead of
+  `plugin:remote-ssh:remote-ssh`. Saved permission rules for the old tool names
+  (`mcp__plugin_remote-ssh_remote-ssh__*`) need to be renamed to `mcp__plugin_remote-ssh_ssh__*`.
+
 ## [0.1.0] - 2026-10-11
 
 ### Added

@@ -19,7 +19,9 @@ class FakeMaster:
     """Run remote commands locally through ``bash -lc``, recording each command."""
 
     def __init__(self) -> None:
+        self.alias = 'gpu-a'
         self.commands: list[str] = []
+        self.timeouts: list[float | None] = []
         self.before_run = None
 
     def run(self, command: str, cwd: str | None = None, input: bytes | None = None, timeout: float | None = 60) -> subprocess.CompletedProcess:
@@ -27,6 +29,7 @@ class FakeMaster:
         if self.before_run is not None:
             self.before_run(command)
         self.commands.append(command)
+        self.timeouts.append(timeout)
         return subprocess.run(['bash', '-lc', command], cwd=cwd, input=input, capture_output=True, timeout=timeout)
 
 
@@ -240,13 +243,47 @@ def test_pull_outbox_round_trip(remote_base: Path, store: Store) -> None:
 
     master.before_run = add_late_file
     assert relay.pull_outbox(master, 'local-sid', store) == 3
-    assert store.pending('local-sid') == msgs
+    assert store.pending('local-sid') == [{**msg, 'relayed_from': 'gpu-a'} for msg in msgs]
     assert [path.name for path in remote_store.outbox_files('local-sid')] == [f'{late["id"]}.json']
     master.before_run = None
     assert relay.pull_outbox(master, 'local-sid', store) == 1
-    assert store.pending('local-sid') == msgs + [late]
+    assert store.pending('local-sid') == [{**msg, 'relayed_from': 'gpu-a'} for msg in msgs + [late]]
     assert remote_store.outbox_files('local-sid') == []
     assert relay.pull_outbox(master, 'local-sid', store) == 0
+
+
+def test_pull_outbox_drops_misaddressed_and_renamed_messages(remote_base: Path, store: Store) -> None:
+    outbox_dir = remote_base / 'outbox' / 'local-sid'
+    outbox_dir.mkdir(parents=True)
+    good = _msg('local-sid', 'fine')
+    misaddressed = _msg('other-sid', 'meant for someone else')
+    renamed = {**_msg('local-sid', 'id does not name the file'), 'id': '../../escape'}
+    spoofed = {**_msg('local-sid', 'claims provenance'), 'relayed_from': 'trusted-host'}
+    for file_name, msg in ((f'{good["id"]}.json', good), (f'{misaddressed["id"]}.json', misaddressed),
+                           ('1-0000000a.json', renamed), (f'{spoofed["id"]}.json', spoofed)):
+        relay.state.write_json_atomic(outbox_dir / file_name, msg)
+    master = FakeMaster()
+    assert relay.pull_outbox(master, 'local-sid', store, timeout=4) == 2
+    assert sorted(msg['body'] for msg in store.pending('local-sid')) == ['claims provenance', 'fine']
+    assert {msg['relayed_from'] for msg in store.pending('local-sid')} == {'gpu-a'}
+    assert store.pending('other-sid') == []
+    assert list(outbox_dir.glob('*.json')) == []
+    assert set(master.timeouts) == {4}
+
+
+def test_has_pending(store: Store) -> None:
+    assert not store.has_pending('sid')
+    msg = _msg('sid')
+    store.deliver(msg)
+    assert store.has_pending('sid')
+    store.claim('sid', msg['id'])
+    assert not store.has_pending('sid')
+
+
+def test_remote_unregister_passes_timeout(remote_base: Path) -> None:
+    master = FakeMaster()
+    relay.remote_unregister(master, 'sid', timeout=3)
+    assert master.timeouts == [3]
 
 
 def test_pull_outbox_missing_dir(remote_base: Path, store: Store) -> None:

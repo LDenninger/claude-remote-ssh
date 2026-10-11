@@ -90,10 +90,12 @@ def is_mounted(mountpoint: Path) -> bool:
     `os.path.ismount` reports False when `lstat` fails, which is exactly what a FUSE mount does once
     its connection or its remote root is gone. Linux therefore reads the kernel mount table. Other
     systems treat the errors a dead mount raises as mounted, but only when the parent directory still
-    lists the mountpoint.
+    lists the mountpoint. The kernel table holds resolved paths, so the mountpoint's parent is
+    resolved too. The mountpoint itself is never resolved, since a hung mount would block that call.
     """
     if MOUNTINFO.exists():
-        target = os.path.abspath(mountpoint)
+        absolute = os.path.abspath(mountpoint)
+        target = os.path.join(os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute))
         for line in MOUNTINFO.read_text().splitlines():
             field = line.split(' ')[4]
             if re.sub(r'\\(\d{3})', lambda m: chr(int(m[1], 8)), field) == target:

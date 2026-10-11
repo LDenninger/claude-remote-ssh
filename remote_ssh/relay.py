@@ -25,6 +25,7 @@ from remote_ssh import state
 ID_RE = re.compile(r'^[A-Za-z0-9-]{1,128}$')
 MSG_FILE_RE = re.compile(r'^\d+-[0-9a-f]{8}\.json$')
 REMOTE_TIMEOUT_S = 30
+MAX_BODY_BYTES = 16 * 1024
 
 
 #---------------------------------------------------------------------
@@ -159,6 +160,10 @@ class Store:
             return
         state.write_json_atomic(inbox_dir / file_name, msg)
 
+    def has_pending(self, sid: str) -> bool:
+        """Return whether the inbox of ``sid`` holds an undelivered message, without parsing any."""
+        return bool(self.__list_msg_files(self.base / 'inbox' / _check_id(sid)))
+
     def __list_msg_files(self, msg_dir: Path) -> list[Path]:
         """Return the message files in ``msg_dir`` sorted by id, ignoring temp files."""
         if not msg_dir.is_dir():
@@ -268,9 +273,14 @@ def _get_remote_base() -> str:
     return shlex.quote(override) if override else '"$HOME/.claude/remote-ssh"'
 
 
-def _run(master: Any, command: str, input: bytes | None = None) -> bytes:
-    """Run ``command`` through ``master`` and return stdout, raising RemoteCommandError on failure."""
-    result = master.run(f'umask 077; {command}', input=input, timeout=REMOTE_TIMEOUT_S)
+def _run(master: Any, command: str, input: bytes | None = None, timeout: float = REMOTE_TIMEOUT_S) -> bytes:
+    """Run ``command`` through ``master`` under plain ``sh`` and return stdout.
+
+    Raises:
+        RemoteCommandError: The command exited non-zero.
+        subprocess.TimeoutExpired: The command outlived ``timeout`` seconds.
+    """
+    result = master.run(f'umask 077; {command}', input=input, timeout=timeout)
     if result.returncode != 0:
         raise RemoteCommandError(result.returncode, result.stderr.decode('utf-8', 'replace').strip())
     return result.stdout
@@ -294,9 +304,9 @@ def remote_register(master: Any, sid: str, entry: dict) -> None:
     _run(master, _build_write_cmd(f'{_get_remote_base()}/sessions', f'{_check_id(sid)}.json'), input=payload)
 
 
-def remote_unregister(master: Any, sid: str) -> None:
-    """Remove ``sessions/<sid>.json`` on the remote if present."""
-    _run(master, f'rm -f -- {_get_remote_base()}/sessions/{shlex.quote(_check_id(sid) + ".json")}')
+def remote_unregister(master: Any, sid: str, timeout: float = REMOTE_TIMEOUT_S) -> None:
+    """Remove ``sessions/<sid>.json`` on the remote if present, giving up after ``timeout`` seconds."""
+    _run(master, f'rm -f -- {_get_remote_base()}/sessions/{shlex.quote(_check_id(sid) + ".json")}', timeout=timeout)
 
 
 def remote_sessions(master: Any) -> list[dict]:
@@ -319,51 +329,61 @@ def remote_deliver(master: Any, msg: dict) -> None:
     _run(master, _build_write_cmd(inbox_expr, f'{_check_id(msg["id"])}.json'), input=json.dumps(msg).encode())
 
 
-def pull_outbox(master: Any, sid: str, store: Store) -> int:
+def pull_outbox(master: Any, sid: str, store: Store, timeout: float = REMOTE_TIMEOUT_S) -> int:
     """Move the remote outbox of ``sid`` into the local inbox.
 
-    One round trip lists and reads every message file. Each parsed message is delivered locally,
-    then a second round trip removes exactly the pulled names, so a file that arrived after the
-    listing stays for the next pull.
+    One round trip lists and reads every message file. Each valid message is delivered locally
+    with ``relayed_from`` set to the master's alias, the provenance the plugin vouches for, then
+    a second round trip removes exactly the pulled names, so a file that arrived after the
+    listing stays for the next pull. A message that is not addressed to ``sid`` or whose id does
+    not name its file is dropped from the outbox without delivery.
 
     Args:
         master: Connection to the remote.
         sid: Local session id whose outbox is pulled.
         store: Local store receiving the messages.
+        timeout: Seconds each round trip may take. Defaults to ``REMOTE_TIMEOUT_S``.
 
     Returns:
-        The number of messages pulled.
+        The number of messages delivered.
+
+    Raises:
+        RemoteCommandError: A round trip exited non-zero.
+        subprocess.TimeoutExpired: A round trip outlived ``timeout``.
     """
     outbox_expr = f'{_get_remote_base()}/outbox/{shlex.quote(_check_id(sid))}'
     command = (f'cd {outbox_expr} 2>/dev/null || exit 0; '
                f'for f in *.json; do [ -f "$f" ] || continue; printf "%s\\0" "$f"; cat -- "$f"; printf "\\0"; done; true')
-    records = _split_nul(_run(master, command))
-    pulled = []
+    records = _split_nul(_run(master, command, timeout=timeout))
+    done, delivered = [], 0
     for file_name_raw, content in zip(records[0::2], records[1::2]):
         file_name = file_name_raw.decode('utf-8', 'replace')
         if not MSG_FILE_RE.match(file_name):
             continue
+        done.append(file_name)
         try:
             msg = json.loads(content)
-            store.deliver(msg)
-        except (ValueError, KeyError, TypeError):
+        except ValueError:
             continue
-        pulled.append(file_name)
-    if pulled:
-        _run(master, f'cd {outbox_expr} && rm -f -- {" ".join(shlex.quote(name) for name in pulled)}')
-    return len(pulled)
+        if not isinstance(msg, dict) or msg.get('to_session') != sid or f'{msg.get("id")}.json' != file_name:
+            continue
+        store.deliver({**msg, 'relayed_from': master.alias})
+        delivered += 1
+    if done:
+        _run(master, f'cd {outbox_expr} && rm -f -- {" ".join(shlex.quote(name) for name in done)}', timeout=timeout)
+    return delivered
 
 
-def remote_cleanup(master: Any, hostname: str, live_sids: set[str]) -> None:
-    """Remove remote session entries relayed through ``hostname`` whose session is not alive.
+def remote_cleanup(master: Any, machine: str, live_sids: set[str]) -> None:
+    """Remove remote session entries relayed through ``machine`` whose session is not alive.
 
     Args:
         master: Connection to the remote.
-        hostname: Local hostname, matched against ``relay_via``.
+        machine: Id of this machine from ``state.machine_id()``, matched against ``relay_via``.
         live_sids: Session ids still alive on this machine. Their entries are kept.
     """
     stale = [entry.get('session_id') for entry in remote_sessions(master)
-             if entry.get('relay_via') == hostname and entry.get('session_id') not in live_sids]
+             if entry.get('relay_via') == machine and entry.get('session_id') not in live_sids]
     names = [shlex.quote(f'{sid}.json') for sid in stale if isinstance(sid, str) and ID_RE.match(sid)]
     if names:
         _run(master, f'cd {_get_remote_base()}/sessions && rm -f -- {" ".join(names)}')

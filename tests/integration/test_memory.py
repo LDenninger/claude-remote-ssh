@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 def test_i5_memory_rewrite_and_write_through_mount(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
@@ -29,3 +33,17 @@ def test_i5_memory_rewrite_and_write_through_mount(session: Any, sshd: dict, rem
     text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
     assert not is_error, text
     assert not os.path.ismount(mem_mount)
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='git not installed')
+def test_memory_of_a_repository_subdirectory_is_the_repository_memory(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
+    """Claude Code keeps one memory directory per git repository, named after its root."""
+    subprocess.run(['git', 'init', '-q', str(remote_dir)], check=True)
+    (remote_dir / 'src').mkdir()
+    (remote_memory_dir / 'MEMORY.md').write_text('# Memory\n- [Repo fact](fact.md)\n')
+    sess = session('a')
+    text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir / 'src'))
+    assert not is_error, text
+    assert f'[Repo fact]({sess.rt / "h1" / "mem"}/fact.md)' in text, text
+    text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
+    assert not is_error, text

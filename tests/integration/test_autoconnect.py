@@ -21,7 +21,7 @@ def test_autoconnect_delivers_memory_block_once(session: Any, sshd: dict, remote
     cwd = tmp_path / 'proj'
     (cwd / '.claude').mkdir(parents=True)
     hosts = [{'alias': 'h1', 'host': sshd['host'], 'path': str(remote_dir), 'autoconnect': True}]
-    (cwd / '.claude' / 'remote-ssh.json').write_text(json.dumps({'hosts': hosts}))
+    (cwd / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
     sess = session('a', cwd=cwd)
 
     queued = sess.rt / 'context' / 'h1.md'

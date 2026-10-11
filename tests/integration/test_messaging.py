@@ -59,6 +59,7 @@ def test_i7_round_trip_including_after_reconnect(session: Any, sshd: dict, remot
     assert not is_error and 'via outbox' in text, text
     delay = assert_arrives(sess_a, 'pong from B', 2 * POLL_INTERVAL_S)
     print(f'\nI7: outbox pull took {delay:.2f} s')
+    assert 'relayed by host h1' in inbox_text(sess_a)
 
     #--- a reply written while A's master is down is pulled once it is back ---
     [master_pid] = pids_matching(f'-M -N -S {sess_a.rt / "h1" / "c"}')

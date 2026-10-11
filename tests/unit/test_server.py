@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from remote_ssh import __version__, relay, server, state
+from remote_ssh import __version__, memory, relay, server, state
 
 
 class StubStore:
@@ -593,3 +593,230 @@ def test_config_treats_unresolved_user_config_placeholders_as_unset(monkeypatch:
     assert config.messaging is True
     assert config.poll_interval_s == 2.0
     assert config.sshfs_options == ''
+
+
+#---------------------------------------------------------------------
+# Messaging tools
+#---------------------------------------------------------------------
+
+def _stamped_msg(body: str = 'hi', to: str = 'sid', **fields: str) -> dict:
+    return {**relay.new_message('abcdef1234567890', 'proj-abcd', 'laptop', to, body), 'sent_at': '2026-10-11T12:00:00+00:00', **fields}
+
+
+@pytest.fixture
+def remote_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    base = tmp_path / 'remote'
+    monkeypatch.setenv('REMOTE_SSH_REMOTE_BASE', str(base))
+    return base
+
+
+class ShellMaster:
+    """Run remote commands locally through ``sh``."""
+
+    alias = 'gpu-a'
+
+    def run(self, command: str, cwd: str | None = None, input: bytes | None = None, timeout: float | None = 60) -> subprocess.CompletedProcess:
+        return subprocess.run(['sh', '-c', command], cwd=cwd, input=input, capture_output=True, timeout=timeout)
+
+
+@pytest.fixture
+def messaging_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> server.Server:
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'msg'))
+    runtime = state.Runtime.current()
+    runtime.update_owner(session_id='sid-0001', cwd='/w/proj', name='proj-sid-')
+    app = server.Server(runtime, server.Config(), store=relay.Store(tmp_path / 'msg'), on_exit=lambda: None)
+    app._Server__connected = lambda tool, alias: (SimpleNamespace(master=ShellMaster()), '')
+    return app
+
+
+def test_remote_sessions_output_is_sanitized(messaging_app: server.Server, remote_base: Path) -> None:
+    relay.Store(remote_base).register('peer-0001', {'name': 'bad\nname' + 'x' * 100, 'cwd': '/a\nb', 'host': 'h\nost', 'relay_via': 'm\nid'})
+    text, is_error = messaging_app.call_tool('remote_sessions', {'alias': 'h'})
+    assert not is_error
+    assert len(text.split('\n')) == 3
+    assert 'x' * 65 not in text
+
+
+def test_send_limit_is_8000_characters(messaging_app: server.Server) -> None:
+    messaging_app.store.register('peer-0001', {'name': 'peer'})
+    assert relay.MAX_BODY_CHARS == 8000
+    _, is_error = messaging_app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'é' * 8001})
+    assert is_error
+    _, is_error = messaging_app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'é' * 8000})
+    assert not is_error
+
+
+def test_remote_inbox_tool_claims_and_shows_everything(messaging_app: server.Server) -> None:
+    for ii in range(5):
+        messaging_app.store.deliver({**_stamped_msg('x' * 3000, to='sid-0001'), 'id': f'{1000 + ii}-0000000{ii}'})
+    text, _ = messaging_app.call_tool('remote_inbox', {})
+    assert text.startswith('inbox · 5 new · 0 delivered\n--- new ---\n') and messaging_app.store.pending('sid-0001') == []
+    assert text.count('x' * 3000) == 5
+
+
+def test_remote_send_to_relayed_target_goes_to_remote_outbox(messaging_app: server.Server, remote_base: Path) -> None:
+    remote_store = relay.Store(remote_base)
+    remote_store.register('relayed-0001', {'name': 'there', 'relay_via': 'machine-b'})
+    remote_store.register('onhost-0001', {'name': 'here'})
+    text, is_error = messaging_app.call_tool('remote_send', {'alias': 'h', 'session': 'relayed-0001', 'body': 'hello'})
+    assert not is_error and 'route: outbox' in text, text
+    assert len(list((remote_base / 'outbox' / 'relayed-0001').glob('*.json'))) == 1
+    assert not (remote_base / 'inbox' / 'relayed-0001').exists()
+    text, is_error = messaging_app.call_tool('remote_send', {'alias': 'h', 'session': 'onhost-0001', 'body': 'hello'})
+    assert not is_error and 'route: inbox' in text, text
+    assert len(list((remote_base / 'inbox' / 'onhost-0001').glob('*.json'))) == 1
+
+
+def test_server_writes_messaging_flag_to_state(messaging_app: server.Server) -> None:
+    messaging_app.config.messaging = False
+    messaging_app.run_startup()
+    assert messaging_app.runtime.load_state()['messaging'] is False
+
+
+#---------------------------------------------------------------------
+# remote_exec validation and error flag
+#---------------------------------------------------------------------
+
+@pytest.fixture
+def app_with_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> server.Server:
+    """Return a server holding a stub host gpu-a whose exec returns what `outputs` holds."""
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt2'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    app = server.Server(state.Runtime.current(), server.Config(), store=SimpleNamespace(), on_exit=lambda: None)
+    host = SimpleNamespace(alias='gpu-a', status='connected', abs_path='/p', lock=threading.Lock())
+    host.outputs = []
+    host.master = SimpleNamespace(exec=lambda command, cwd, timeout: host.outputs.pop(0))
+    app.hosts['gpu-a'] = host
+    app.stub = host
+    return app
+
+
+@pytest.mark.parametrize('bad', [0, -1, 3601, 1.5, '5', True, []])
+def test_remote_exec_rejects_bad_timeout(app_with_host: server.Server, bad: Any) -> None:
+    text, is_error = app_with_host.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x', 'timeout_s': bad})
+    assert is_error and 'timeout_s must be an integer from 1 to 3600' in text
+
+
+@pytest.mark.parametrize('good', [1, 3600, None])
+def test_remote_exec_accepts_good_timeout(app_with_host: server.Server, good: Any) -> None:
+    app_with_host.stub.outputs = [('', '', 0)]
+    args = {'alias': 'gpu-a', 'command': 'x', **({} if good is None else {'timeout_s': good})}
+    assert app_with_host.call_tool('remote_exec', args) == ('exec gpu-a · exit 0', False)
+
+
+@pytest.mark.parametrize('code, is_error', [(0, False), (1, False), (2, False), (123, False), (124, True), (137, True), (255, True)])
+def test_remote_exec_error_flag_only_for_timeout_signal_or_ssh_failure(app_with_host: server.Server, code: int, is_error: bool) -> None:
+    app_with_host.stub.outputs = [('found\n', '', code)]
+    text, flag = app_with_host.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'grep x f'})
+    assert flag is is_error
+    assert text.startswith('exec gpu-a · error' if code == 255 else f'exec gpu-a · exit {code}') and 'found' in text
+
+
+#---------------------------------------------------------------------
+# Remote memory index
+#---------------------------------------------------------------------
+
+@pytest.fixture
+def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> state.Runtime:
+    """Return an isolated runtime owned by the test process."""
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'msg'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    return state.Runtime.current()
+
+
+class MemMaster:
+    """Master stand-in whose `run` records its arguments and returns or raises a canned result."""
+
+    def __init__(self, result: Any) -> None:
+        self.result = result
+        self.calls: list[tuple[str, Any]] = []
+
+    def run(self, command: str, timeout: Any = 60, **kwargs: Any) -> Any:
+        self.calls.append((command, timeout))
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def host_session(runtime: state.Runtime, master: MemMaster) -> server.HostSession:
+    host = server.HostSession('gpu-a', 'h', '/p', runtime, server.Config(), {})
+    host.master, host.mounted_mem, host.mem_uri = master, True, '/home/u/.claude/projects/-p/memory'
+    return host
+
+
+def test_memory_block_reads_over_ssh_with_a_timeout(runtime: state.Runtime) -> None:
+    host = host_session(runtime, MemMaster(SimpleNamespace(returncode=0, stdout=b'# Remote index\n- [A](a.md)\n')))
+    (host.mem_dir).mkdir(parents=True, exist_ok=True)
+    (host.mem_dir / 'MEMORY.md').write_text('FROM THE MOUNT')
+    block = host.memory_block()
+    assert '[A](a.md)' in block and 'FROM THE MOUNT' not in block
+    [(command, timeout)] = host.master.calls
+    assert 'MEMORY.md' in command and timeout == server.MEMORY_READ_TIMEOUT_S <= 3
+    assert memory.cache_path(runtime.dir, 'gpu-a').read_text() == '# Remote index\n- [A](a.md)\n'
+
+
+def test_memory_block_survives_a_hung_host(runtime: state.Runtime) -> None:
+    host = host_session(runtime, MemMaster(subprocess.TimeoutExpired('ssh', 3)))
+    assert host.memory_block() == ''
+
+
+#---------------------------------------------------------------------
+# Autoconnect on a new session id and messages across /clear
+#---------------------------------------------------------------------
+
+@pytest.fixture
+def session_app(runtime: state.Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> server.Server:
+    monkeypatch.setattr(server.relay, 'remote_register', lambda master, sid, entry: None)
+    monkeypatch.setattr(server.relay, 'remote_unregister', lambda master, sid, timeout=30: None)
+    monkeypatch.setattr(server.relay, 'remote_cleanup', lambda master, machine, live: None)
+    return server.Server(runtime, server.Config(), store=relay.Store(tmp_path / 'msg'), on_exit=lambda: None)
+
+
+def test_new_session_id_connects_hosts_that_are_not_connected(session_app: server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    connected: list[str] = []
+    monkeypatch.setattr(session_app, 'connect_host', lambda alias, host, path, background=False: connected.append(alias) or ('connected', False))
+    session_app.runtime.update_owner(session_id='sid-0001', cwd='/w')
+    state.write_json_atomic(session_app.runtime.dir / 'autoconnect.json', [{'alias': 'gpu-a', 'host': 'h'}])
+    session_app.run_startup()
+    assert wait_until(lambda: connected == ['gpu-a'])
+
+    #--- unchanged id: nothing happens ---
+    session_app.autoconnect_new_session()
+    time.sleep(0.1)
+    assert connected == ['gpu-a']
+
+    #--- /resume into a session of another project: gpu-a is held, gpu-b is new ---
+    session_app.hosts['gpu-a'] = SimpleNamespace(status='connected')
+    state.write_json_atomic(session_app.runtime.dir / 'autoconnect.json', [{'alias': 'gpu-a', 'host': 'h'}, {'alias': 'gpu-b', 'host': 'h2', 'path': '/p'}])
+    session_app.runtime.update_owner(session_id='sid-0002')
+    session_app.autoconnect_new_session()
+    assert wait_until(lambda: connected == ['gpu-a', 'gpu-b'])
+    session_app.autoconnect_new_session()
+    time.sleep(0.1)
+    assert connected == ['gpu-a', 'gpu-b']
+
+
+def test_clear_moves_unread_messages_and_pulls_the_old_outbox(session_app: server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
+    pulls: list[str] = []
+
+    def pull(master: Any, sid: str, store: relay.Store, timeout: float = 30) -> int:
+        pulls.append(sid)
+        store.deliver(relay.new_message('remote-0001', 'peer', 'gpu-a', sid, 'late from the host'))
+        return 1
+
+    monkeypatch.setattr(server.relay, 'pull_outbox', pull)
+    session_app.hosts = {'gpu-a': SimpleNamespace(alias='gpu-a', status='connected', master=SimpleNamespace(alias='gpu-a'))}
+    session_app.runtime.update_owner(session_id='old-0001', cwd='/w')
+    session_app.sync_session_id()
+    session_app.store.deliver(relay.new_message('peer-0001', 'peer', 'here', 'old-0001', 'sent before clear'))
+
+    session_app.runtime.update_owner(session_id='new-0002')
+    session_app.sync_session_id()
+    assert pulls == ['old-0001']
+    assert not session_app.store.has_pending('old-0001')
+    bodies = sorted(msg['body'] for msg in session_app.store.pending('new-0002'))
+    assert bodies == ['late from the host', 'sent before clear']
+    assert all(msg['to_session'] == 'new-0002' for msg in session_app.store.pending('new-0002'))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
 import threading
 from pathlib import Path
@@ -86,7 +87,7 @@ def test_load_state_strict_raises_on_corrupt_file(runtime: Runtime) -> None:
         runtime.load_state(strict=True)
 
 
-def test_iter_runtime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_iter_runtime_dirs_lists_only_real_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'missing'))
     assert list(state.iter_runtime_dirs()) == []
     base_root = tmp_path / 'base'
@@ -145,7 +146,7 @@ def test_ensure_private_dir_rejects_foreign_owner(tmp_path: Path, monkeypatch: p
         state.ensure_private_dir(target_dir)
 
 
-def test_write_and_read_json(tmp_path: Path) -> None:
+def test_write_json_atomic_roundtrips_privately(tmp_path: Path) -> None:
     json_path = tmp_path / 'a.json'
     state.write_json_atomic(json_path, {'k': [1, 2]})
     assert state.read_json(json_path) == {'k': [1, 2]}
@@ -155,7 +156,7 @@ def test_write_and_read_json(tmp_path: Path) -> None:
     assert [entry.name for entry in tmp_path.iterdir()] == ['a.json']
 
 
-def test_read_json_default(tmp_path: Path) -> None:
+def test_read_json_returns_default_for_missing_and_none_for_corrupt_file(tmp_path: Path) -> None:
     assert state.read_json(tmp_path / 'missing.json', {'d': 1}) == {'d': 1}
     bad_path = tmp_path / 'bad.json'
     bad_path.write_text('{not json')
@@ -166,7 +167,7 @@ def test_read_json_default(tmp_path: Path) -> None:
 # Runtime directory
 #---------------------------------------------------------------------
 
-def test_runtime_dir_is_private(runtime: Runtime, tmp_path: Path) -> None:
+def test_runtime_paths_are_private_and_derived_from_the_claude_key(runtime: Runtime, tmp_path: Path) -> None:
     assert runtime.dir == tmp_path / 'rt' / runtime.claude.key
     assert _mode(runtime.dir) == 0o700
     assert _mode(runtime.dir.parent) == 0o700
@@ -185,7 +186,7 @@ def test_runtime_rejects_open_base(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         Runtime(ClaudeProc(1, 's'))
 
 
-def test_runtime_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_runtime_current_follows_the_found_claude_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
     monkeypatch.setattr(state, 'find_claude', lambda: ClaudeProc(7, 's'))
     assert Runtime.current().claude == ClaudeProc(7, 's')
@@ -193,7 +194,7 @@ def test_runtime_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert Runtime.current() is None
 
 
-def test_host_paths(runtime: Runtime) -> None:
+def test_host_paths_are_private_subdirectories_of_the_runtime_dir(runtime: Runtime) -> None:
     host_dir = runtime.host_dir('gpu-a')
     assert host_dir == runtime.dir / 'gpu-a'
     assert _mode(host_dir) == 0o700
@@ -206,7 +207,7 @@ def test_host_paths(runtime: Runtime) -> None:
         runtime.host_dir('../escape')
 
 
-def test_owner_merge(runtime: Runtime) -> None:
+def test_update_owner_merges_fields(runtime: Runtime) -> None:
     assert runtime.owner() == {}
     runtime.update_owner(session_id='abc', cwd='/w')
     runtime.update_owner(server_pid=99)
@@ -220,7 +221,7 @@ def test_load_state_defaults_are_independent(runtime: Runtime) -> None:
     assert state.DEFAULT_STATE['hosts'] == {}
 
 
-def test_update_state_persists(runtime: Runtime) -> None:
+def test_update_state_persists_changes(runtime: Runtime) -> None:
     def set_redirect(current: dict) -> None:
         current['redirect'] = 'gpu-a'
         current['hosts']['gpu-a'] = {'status': 'connected'}
@@ -285,3 +286,44 @@ def test_concurrent_claimers_share_out_each_block_once(runtime: Runtime) -> None
         thread.join()
     claimed = [block for blocks in results for block in blocks]
     assert sorted(claimed) == sorted(f'block {ii}' for ii in range(20))
+
+
+#---------------------------------------------------------------------
+# Machine id
+#---------------------------------------------------------------------
+
+def test_machine_id_differs_per_hostname(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path))
+    monkeypatch.setattr(socket, 'gethostname', lambda: 'node1')
+    first = state.machine_id()
+    monkeypatch.setattr(socket, 'gethostname', lambda: 'node2')
+    second = state.machine_id()
+    assert first != second
+    monkeypatch.setattr(socket, 'gethostname', lambda: 'node1')
+    assert state.machine_id() == first
+
+
+def test_machine_id_reader_never_sees_a_half_written_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path))
+    nested: list[str] = []
+    real = state.secrets.token_hex
+
+    def token_hex_with_concurrent_reader(nbytes: int) -> str:
+        monkeypatch.setattr(state.secrets, 'token_hex', real)
+        nested.append(state.machine_id())
+        return real(nbytes)
+
+    monkeypatch.setattr(state.secrets, 'token_hex', token_hex_with_concurrent_reader)
+    outer = state.machine_id()
+    assert nested[0] and nested[0] == outer
+
+
+def test_machine_id_concurrent_callers_agree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path))
+    ids: list[str] = []
+    threads = [threading.Thread(target=lambda: ids.append(state.machine_id())) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(ids)) == 1 and ids[0]

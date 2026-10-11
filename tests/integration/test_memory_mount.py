@@ -1,4 +1,4 @@
-"""Integration test I5: remote memory index rewrite and a write through the memory mount."""
+"""Integration test of the remote memory index rewrite and a write through the memory mount."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 
-def test_i5_memory_block_and_write_through_mount(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
+def test_memory_block_and_write_through_mount(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path) -> None:
     (remote_memory_dir / 'MEMORY.md').write_text('# Memory\n- [Cluster quota](quota.md) is 4 GPUs\n- [Docs](https://example.com/x)\n')
     (remote_memory_dir / 'quota.md').write_text('The quota is 4 GPUs.\n')
     sess = session('a')

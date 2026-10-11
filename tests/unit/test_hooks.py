@@ -9,11 +9,14 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from remote_ssh import hooks, relay, state
+from remote_ssh import hooks, platform, relay, state
 
 
 @pytest.fixture
@@ -384,3 +387,252 @@ def test_main_prints_json_and_tolerates_bad_input(runtime: state.Runtime, monkey
     captured = capsys.readouterr()
     assert captured.out == ''
     assert 'remote-ssh hook' in captured.err
+
+
+#---------------------------------------------------------------------
+# Redirect safety: deny rules, ControlMaster=no, watchdog, fail closed
+#---------------------------------------------------------------------
+
+@pytest.fixture
+def redirect_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> state.Runtime:
+    """Return an isolated runtime with host gpu-a as redirect target and an empty Claude config dir."""
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'msg'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'home-claude'))
+    monkeypatch.delenv('CLAUDE_PLUGIN_OPTION_REDIRECT_CONFIRM', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_SSH_OPTS', raising=False)
+    rt = state.Runtime.current()
+
+    def apply(saved: dict) -> None:
+        saved['hosts']['gpu-a'] = {'host': 'user@gpu', 'path': '/srv/proj', 'slug': '-srv-proj', 'status': 'connected',
+                                   'mounted_fs': False, 'mounted_mem': False, 'error': None}
+        saved['redirect'] = 'gpu-a'
+    rt.update_state(apply)
+    return rt
+
+
+def write_settings(path: Path, deny: list[str]) -> None:
+    """Write a settings file with the given deny rules."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({'permissions': {'deny': deny}}))
+
+
+def pre_tool_use(command: str, cwd: Path, **tool_input: Any) -> dict:
+    """Run the PreToolUse handler for one Bash call and return its hookSpecificOutput."""
+    payload = {'tool_name': 'Bash', 'cwd': str(cwd), 'tool_input': {'command': command, **tool_input}}
+    return hooks.dispatch('PreToolUse', payload)['hookSpecificOutput']
+
+
+@pytest.mark.parametrize('pattern, command, expected', [
+    ('rm -rf:*', 'rm -rf /tmp/x', True),
+    ('rm -rf:*', 'rm -rf', True),
+    ('rm -rf:*', 'rm -r /tmp/x', False),
+    ('rm *', 'rm', True),
+    ('ls *', 'lsof', False),
+    ('ls*', 'lsof', True),
+    ('npm run build', 'npm run build', True),
+    ('npm run build', 'npm run build --watch', False),
+    ('git push *', 'git push origin main', True),
+    ('git * main', 'git push origin main', True),
+    ('* --version', 'node --version', True),
+    ('*', 'anything', True),
+])
+def test_rule_matches_follows_permission_syntax(pattern: str, command: str, expected: bool) -> None:
+    assert hooks.rule_matches(pattern, command) is expected
+
+
+@pytest.mark.parametrize('command', [
+    'rm -rf /srv/x',
+    'echo hi && rm -rf /srv/x',
+    'echo hi; rm -rf /srv/x',
+    'false || rm -rf /srv/x',
+    'cat f | rm -rf /srv/x',
+    'echo hi\nrm -rf /srv/x',
+    'echo $(rm -rf /srv/x)',
+    'echo `rm -rf /srv/x`',
+    '(rm -rf /srv/x)',
+    'FOO=1 rm -rf /srv/x',
+    'timeout 5 rm -rf /srv/x',
+    'nohup rm -rf /srv/x &',
+    'if true; then rm -rf /srv/x; fi',
+    'rm -rf "/srv/x"',
+    "r'm' -rf /srv/x",
+    '/bin/rm -rf /srv/x',
+])
+def test_deny_rule_blocks_original_command_in_any_position(redirect_runtime: state.Runtime, tmp_path: Path, command: str) -> None:
+    write_settings(tmp_path / 'proj' / '.claude' / 'settings.json', ['Bash(rm -rf:*)'])
+    output = pre_tool_use(command, tmp_path / 'proj')
+    assert output['permissionDecision'] == 'deny'
+    assert 'Bash(rm -rf:*)' in output['permissionDecisionReason']
+    assert 'updatedInput' not in output
+
+
+def test_deny_rule_does_not_block_other_commands(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    write_settings(tmp_path / 'proj' / '.claude' / 'settings.json', ['Bash(rm -rf:*)'])
+    output = pre_tool_use('echo "rm -r not here"; ls -la', tmp_path / 'proj')
+    assert output['permissionDecision'] == 'ask'
+    assert 'updatedInput' in output
+
+
+@pytest.mark.parametrize('where', ['user', 'project', 'local'])
+def test_deny_rules_are_read_from_all_three_settings_files(redirect_runtime: state.Runtime, tmp_path: Path, where: str) -> None:
+    paths = {'user': tmp_path / 'home-claude' / 'settings.json',
+             'project': tmp_path / 'proj' / '.claude' / 'settings.json',
+             'local': tmp_path / 'proj' / '.claude' / 'settings.local.json'}
+    write_settings(paths[where], ['Read(./secrets)', 'Bash(curl *)'])
+    output = pre_tool_use('curl http://x', tmp_path / 'proj')
+    assert output['permissionDecision'] == 'deny'
+    assert str(paths[where]) in output['permissionDecisionReason']
+
+
+def test_unreadable_settings_deny(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    settings = tmp_path / 'proj' / '.claude' / 'settings.json'
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{not json')
+    output = pre_tool_use('ls', tmp_path / 'proj')
+    assert output['permissionDecision'] == 'deny'
+    assert 'deny rules' in output['permissionDecisionReason']
+
+
+def test_local_prefix_skips_the_redirect_and_keeps_the_command(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    write_settings(tmp_path / 'proj' / '.claude' / 'settings.json', ['Bash(rm -rf:*)'])
+    output = pre_tool_use('local: rm -rf x', tmp_path / 'proj')
+    assert output['updatedInput']['command'] == 'rm -rf x'
+
+
+def test_approval_prompt_shows_original_command_truncated(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    assert pre_tool_use('ls -la', tmp_path)['permissionDecisionReason'] == 'redirect gpu-a · runs on gpu-a\ncommand: ls -la'
+    long_reason = pre_tool_use('echo ' + 'x' * 1000, tmp_path)['permissionDecisionReason']
+    assert long_reason.startswith('redirect gpu-a · runs on gpu-a\ncommand: echo xxx')
+    assert len(long_reason) <= 350
+
+
+def test_hook_rewrite_never_becomes_a_master(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    argv = shlex.split(pre_tool_use('ls', tmp_path)['updatedInput']['command'])
+    assert 'ControlMaster=no' in argv
+
+
+@pytest.mark.parametrize('given, seconds', [(5000, 5), (5001, 6), (1, 1), (None, 120), ('x', 120), (0, 120), (-5, 120), (True, 120), (9_999_000, 600)])
+def test_bash_timeout_s_rounds_up_and_clamps_the_tool_timeout(given: Any, seconds: int) -> None:
+    assert hooks.bash_timeout_s({} if given is None else {'timeout': given}) == seconds
+
+
+def test_redirected_command_carries_the_remote_watchdog(redirect_runtime: state.Runtime, tmp_path: Path) -> None:
+    remote = shlex.split(pre_tool_use('sleep 99', tmp_path, timeout=7000)['updatedInput']['command'])[-1]
+    watchdog = shlex.split(remote)
+    assert watchdog[:2] == ['bash', '-c'] and watchdog[3] == '7'
+    default = shlex.split(shlex.split(pre_tool_use('sleep 99', tmp_path)['updatedInput']['command'])[-1])
+    assert default[3] == '120'
+
+
+def test_pre_tool_use_hook_is_blocking_on_failure() -> None:
+    hooks_json = json.loads((ROOT / 'hooks' / 'hooks.json').read_text())
+    assert hooks_json['hooks']['PreToolUse'][0]['hooks'][0]['onFailure'] == 'block'
+
+
+def test_flag_without_findable_runtime_denies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'rt'))
+    monkeypatch.setattr(state.Runtime, 'current', classmethod(lambda cls: None))
+    payload = {'tool_name': 'Bash', 'tool_input': {'command': 'ls'}}
+    assert hooks.dispatch('PreToolUse', payload) is None
+    (tmp_path / 'rt' / 'abc').mkdir(parents=True)
+    (tmp_path / 'rt' / 'abc' / 'redirect-on').touch()
+    assert hooks.dispatch('PreToolUse', payload)['hookSpecificOutput']['permissionDecision'] == 'deny'
+
+
+#---------------------------------------------------------------------
+# Autoconnect config location
+#---------------------------------------------------------------------
+
+def start(cwd: Path, session_id: str = 'sid-0001') -> dict | None:
+    return hooks.dispatch('SessionStart', {'session_id': session_id, 'cwd': str(cwd), 'source': 'startup'})
+
+
+@pytest.mark.parametrize('name', ['remote-ssh.json', 'remote-ssh.local.json'])
+def test_repo_config_is_ignored_with_one_note_per_session(runtime: state.Runtime, tmp_path: Path, name: str) -> None:
+    (tmp_path / '.claude').mkdir()
+    hosts = [{'alias': 'evil', 'host': 'attacker.example', 'path': '~', 'autoconnect': True}]
+    (tmp_path / '.claude' / name).write_text(json.dumps({'hosts': hosts}))
+    output = start(tmp_path)
+    assert state.read_json(runtime.dir / 'autoconnect.json') == []
+    context = output['hookSpecificOutput']['additionalContext']
+    assert f'.claude/{name}' in context and 'ignored' in context and 'autoconnect.json' in context
+    assert 'evil' not in context.replace('{"projects"', '')
+    assert start(tmp_path) is None
+    assert 'ignored' in start(tmp_path, 'sid-0002')['hookSpecificOutput']['additionalContext']
+
+
+def test_autoconnect_comes_from_the_user_file_per_project(runtime: state.Runtime, tmp_path: Path) -> None:
+    mine, other = tmp_path / 'mine', tmp_path / 'other'
+    mine.mkdir()
+    state.ensure_private_dir(state.msg_base())
+    state.write_json_atomic(state.msg_base() / 'autoconnect.json', {'projects': {
+        str(mine): {'hosts': [{'alias': 'gpu-a', 'host': 'u@gpu', 'path': '/srv/p'}, {'alias': '', 'host': 'x'}, 'junk']},
+        str(other): {'hosts': [{'alias': 'gpu-b', 'host': 'gpu-b'}]}}})
+    start(mine)
+    assert state.read_json(runtime.dir / 'autoconnect.json') == [{'alias': 'gpu-a', 'host': 'u@gpu', 'path': '/srv/p'}]
+
+
+@pytest.mark.parametrize('content', ['not json', '[]', '{"projects": []}', '{"projects": {"%s": {"hosts": 3}}}'])
+def test_malformed_user_file_yields_no_hosts(runtime: state.Runtime, tmp_path: Path, content: str) -> None:
+    state.ensure_private_dir(state.msg_base())
+    (state.msg_base() / 'autoconnect.json').write_text(content.replace('%s', str(tmp_path)))
+    start(tmp_path)
+    assert state.read_json(runtime.dir / 'autoconnect.json') == []
+
+
+#---------------------------------------------------------------------
+# SessionEnd
+#---------------------------------------------------------------------
+
+def server_alive(runtime: state.Runtime) -> None:
+    runtime.update_owner(server_pid=os.getpid())
+
+
+@pytest.mark.parametrize('reason', ['clear', 'resume'])
+def test_session_end_keeps_hosts_when_the_process_continues(runtime: state.Runtime, reason: str) -> None:
+    server_alive(runtime)
+    assert hooks.dispatch('SessionEnd', {'reason': reason}) is None
+    assert not runtime.shutdown_path.exists()
+
+
+@pytest.mark.parametrize('reason', ['logout', 'prompt_input_exit', 'other'])
+def test_session_end_signals_and_returns_without_waiting(runtime: state.Runtime, reason: str) -> None:
+    server_alive(runtime)
+    started = time.monotonic()
+    assert hooks.dispatch('SessionEnd', {'reason': reason}) is None
+    assert time.monotonic() - started < 0.5
+    assert runtime.shutdown_path.exists()
+
+
+def test_session_end_hook_has_no_timeout() -> None:
+    config = json.loads((Path(__file__).resolve().parents[2] / 'hooks' / 'hooks.json').read_text())
+    [entry] = config['hooks']['SessionEnd'][0]['hooks']
+    assert 'timeout' not in entry
+
+
+#---------------------------------------------------------------------
+# SessionStart memory index
+#---------------------------------------------------------------------
+
+def test_session_start_injects_the_cached_index_and_never_reads_the_mount(runtime: state.Runtime, tmp_path: Path) -> None:
+    runtime.update_state(lambda saved: saved['hosts'].__setitem__('gpu-a', {'host': 'h', 'status': 'connected', 'mounted_mem': True}))
+    mount_dir = runtime.mem_path('gpu-a')
+    os.mkfifo(mount_dir / 'MEMORY.md')
+    state.write_text_atomic(state.ensure_private_dir(runtime.dir / 'context') / 'gpu-a.memory', '- [Cached](c.md)\n')
+    done: list[Any] = []
+    thread = threading.Thread(target=lambda: done.append(start(tmp_path)), daemon=True)
+    thread.start()
+    thread.join(5)
+    assert done, 'SessionStart blocked on the mount'
+    assert '[Cached](c.md)' in done[0]['hookSpecificOutput']['additionalContext']
+    assert runtime.claim_context() == [], 'the cache must not be claimed as queued context'
+    (mount_dir / 'MEMORY.md').unlink()
+
+
+def test_session_start_skips_a_host_without_a_cached_index(runtime: state.Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    #--- runners without sshfs add a missing-tools notice, which this test is not about ---
+    monkeypatch.setattr(platform, 'detect', lambda: {'ssh': True, 'sshfs': True, 'fuse': True, 'python': True})
+    runtime.update_state(lambda saved: saved['hosts'].__setitem__('gpu-a', {'host': 'h', 'status': 'connected', 'mounted_mem': True}))
+    assert start(tmp_path) is None

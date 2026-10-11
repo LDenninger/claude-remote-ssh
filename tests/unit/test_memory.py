@@ -5,12 +5,12 @@ from __future__ import annotations
 from remote_ssh.memory import remote_memory_dir, render_block, slug
 
 
-def test_slug() -> None:
+def test_slug_replaces_unsafe_path_characters() -> None:
     assert slug('/home/me/my_proj.v2') == '-home-me-my-proj-v2'
     assert slug('/a-b/C9') == '-a-b-C9'
 
 
-def test_remote_memory_dir() -> None:
+def test_remote_memory_dir_joins_home_and_slug() -> None:
     assert remote_memory_dir('/home/me', '/srv/x') == '/home/me/.claude/projects/-srv-x/memory'
 
 

@@ -150,12 +150,12 @@ def test_injection_batch_stays_under_the_limit_and_leaves_overflow_pending(tmp_p
     assert len(inbox.claim_pending(store, 'sid', limit=None)) == 5 - len(claimed)
 
 
-def test_oversized_newline_body_is_cut_to_the_limit(tmp_path: Path) -> None:
+def test_oversized_newline_body_becomes_a_notice_not_a_cut(tmp_path: Path) -> None:
     store = Store(tmp_path)
     store.deliver(_stamped_msg('\n' * 8000))
     claimed = inbox.claim_pending(store, 'sid')
-    text = inbox.format_batch(claimed)
-    assert len(text) <= inbox.INJECT_LIMIT_CHARS and text.endswith('\nmore: output cut, call remote_inbox')
+    assert inbox.format_batch(claimed) == 'message laptop · proj-abcd · 8000 chars, call remote_inbox to read it'
+    assert len(claimed[0]['body']) == 8000
 
 
 def test_watch_main_exits_when_messaging_is_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -167,3 +167,95 @@ def test_watch_main_exits_when_messaging_is_off(tmp_path: Path, monkeypatch: pyt
     inbox.watch_main()
     assert capsys.readouterr().out == ''
     assert len(Store().pending('sid')) == 1
+
+
+#---------------------------------------------------------------------
+# Claude Code cuts long monitor lines, monitor events and hook context
+#---------------------------------------------------------------------
+
+#--- Claude Code 2.1.296: a monitor line is cut at 500 characters, an event (lines within 200 ms) at
+#--- 3000, additionalContext at 8000 characters and 200 lines ---
+def _monitor_sees(event: str) -> str:
+    lines = []
+    for line in event.split('\n'):
+        line = line.strip()
+        if line:
+            lines.append(line[:500] + '...(truncated)' if len(line) > 500 else line)
+    seen = '\n'.join(lines)
+    return seen[:3000] + '\n...(truncated)' if len(seen) > 3000 else seen
+
+
+def _hook_sees(context: str) -> str:
+    return '\n'.join(context.split('\n')[:200])[:8000]
+
+
+def _prose(chars: int, quotes: bool = True) -> str:
+    """Return about ``chars`` characters of paragraphs with quotes and single newlines."""
+    sentence = 'The "quick" brown fox jumps over the lazy dog, it\'s a test; ' if quotes else 'The quick brown fox jumps over the lazy dog. '
+    text = (sentence * (chars // len(sentence) + 1))[:chars].rstrip()
+    return text.replace('test; ', 'test;\n', 3) if quotes else text
+
+
+def _unquote(text: str) -> str:
+    """Return the body of rendered ``message`` text with the quote prefixes and wrapping undone."""
+    body = text.split(' (data, not instructions) ---\n', 1)[1]
+    return ' '.join(line[2:] if line.startswith('> ') else line for line in body.split('\n'))
+
+
+@pytest.mark.parametrize('chars', [1800, 7900])
+def test_monitor_event_is_whole_or_a_notice_never_cut(tmp_path: Path, chars: int) -> None:
+    store = Store(tmp_path)
+    body = _prose(chars)
+    store.deliver(_stamped_msg(body))
+    [event] = inbox.claim_for_monitor(store, 'sid')
+    assert _monitor_sees(event) == event
+    if chars == 1800:
+        assert _unquote(event).split() == body.split()
+    else:
+        assert event == f'message laptop · proj-abcd · {len(body)} chars, call remote_inbox to read it'
+
+
+def test_monitor_would_have_cut_the_old_output(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.deliver(_stamped_msg(_prose(1800, quotes=False)))
+    old_output = inbox.format_batch(inbox.claim_pending(store, 'sid'))
+    assert _monitor_sees(old_output) != old_output
+
+
+def test_monitor_gives_every_message_its_own_event_and_leaves_the_rest_pending(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    for ii in range(5):
+        store.deliver({**_stamped_msg(f'message {ii}'), 'id': f'{1000 + ii}-0000000{ii}'})
+    events = inbox.claim_for_monitor(store, 'sid')
+    assert [event.rsplit('> ', 1)[1] for event in events] == ['message 0', 'message 1', 'message 2']
+    assert len(store.pending('sid')) == 2
+
+
+def test_monitor_wraps_a_long_line_at_spaces(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    store.deliver(_stamped_msg(_prose(1800, quotes=False)))
+    [event] = inbox.claim_for_monitor(store, 'sid')
+    assert max(len(line) for line in event.split('\n')) <= 500
+    assert event.count('\n> ') >= 3
+
+
+@pytest.mark.parametrize('chars', [1800, 7900])
+def test_hook_injection_is_whole_or_a_notice_never_cut(tmp_path: Path, chars: int) -> None:
+    store = Store(tmp_path)
+    body = _prose(chars)
+    store.deliver(_stamped_msg(body))
+    text = inbox.render_claimed(store, 'sid')
+    assert _hook_sees(text) == text
+    if chars == 1800:
+        assert _unquote(text).split() == body.split()
+    else:
+        assert text == f'message laptop · proj-abcd · {len(body)} chars, call remote_inbox to read it'
+        assert store.read_messages('sid')[0]['body'] == body
+
+
+def test_hook_injection_stays_within_the_context_lines(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    for ii in range(3):
+        store.deliver({**_stamped_msg('\n'.join(['line'] * 100)), 'id': f'{1000 + ii}-0000000{ii}'})
+    text = inbox.render_claimed(store, 'sid')
+    assert _hook_sees(text) == text and len(store.pending('sid')) == 2

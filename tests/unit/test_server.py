@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from remote_ssh import __version__, memory, relay, server, state
+from remote_ssh import __version__, ident, inbox, memory, relay, server, state
 
 
 class StubStore:
@@ -661,11 +661,11 @@ def test_remote_send_to_relayed_target_goes_to_remote_outbox(messaging_app: serv
     remote_store.register('relayed-0001', {'name': 'there', 'relay_via': 'machine-b'})
     remote_store.register('onhost-0001', {'name': 'here'})
     text, is_error = messaging_app.call_tool('remote_send', {'alias': 'h', 'session': 'relayed-0001', 'body': 'hello'})
-    assert not is_error and 'route: outbox' in text, text
+    assert not is_error and text.startswith('send h · there · queued for pickup'), text
     assert len(list((remote_base / 'outbox' / 'relayed-0001').glob('*.json'))) == 1
     assert not (remote_base / 'inbox' / 'relayed-0001').exists()
     text, is_error = messaging_app.call_tool('remote_send', {'alias': 'h', 'session': 'onhost-0001', 'body': 'hello'})
-    assert not is_error and 'route: inbox' in text, text
+    assert not is_error and text.startswith('send h · here · delivered'), text
     assert len(list((remote_base / 'inbox' / 'onhost-0001').glob('*.json'))) == 1
 
 
@@ -820,3 +820,239 @@ def test_clear_moves_unread_messages_and_pulls_the_old_outbox(session_app: serve
     bodies = sorted(msg['body'] for msg in session_app.store.pending('new-0002'))
     assert bodies == ['late from the host', 'sent before clear']
     assert all(msg['to_session'] == 'new-0002' for msg in session_app.store.pending('new-0002'))
+
+
+#---------------------------------------------------------------------
+# Messaging usability: errors, receipts, attachments, stable names
+#---------------------------------------------------------------------
+
+def test_send_to_a_missing_session_lists_the_current_names(messaging_app: server.Server, remote_base: Path) -> None:
+    relay.Store(remote_base).register('peer-0001', {'name': 'train-befb'})
+    relay.Store(remote_base).register('peer-0002', {'name': 'eval-1234'})
+    text, is_error = messaging_app.call_tool('remote_send', {'alias': 'h', 'session': 'train-0000', 'body': 'hi'})
+    assert is_error
+    assert text.split('\n')[:2] == ['send h · error', "reason: no session 'train-0000' on h: it may have ended, been resumed under a new id, or the name may be wrong"]
+    assert 'sessions: eval-1234, train-befb\n' in text
+    text, _ = messaging_app.call_tool('remote_send', {'session': 'nobody', 'body': 'hi'})
+    assert 'sessions: none\n' in text
+
+
+def test_sessions_marks_the_own_registration(messaging_app: server.Server, remote_base: Path) -> None:
+    relay.Store(remote_base).register('sid-0001', {'name': 'proj-sid-', 'cwd': '/w/proj', 'relay_via': 'm1'})
+    relay.Store(remote_base).register('peer-0001', {'name': 'train', 'cwd': '/srv/train'})
+    text, _ = messaging_app.call_tool('remote_sessions', {'alias': 'h'})
+    own = next(line for line in text.split('\n') if line.startswith('proj-sid-'))
+    assert own.split() == ['proj-sid-', '(this', 'session)', 'sid-0001', f'{messaging_app.hostname}:/w/proj', 'runs', 'on', messaging_app.hostname]
+    messaging_app.store.register('sid-0001', {'name': 'proj-sid-', 'cwd': '/w/proj'})
+    text, _ = messaging_app.call_tool('remote_sessions', {})
+    assert 'proj-sid- (this session)' in text and 'runs on' not in text
+
+
+def test_send_result_says_delivered_and_hides_ids_and_routes(messaging_app: server.Server) -> None:
+    messaging_app.store.register('peer-0001', {'name': 'peer'})
+    text, is_error = messaging_app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'hi'})
+    assert not is_error
+    assert text == "send · peer · delivered\nreply: arrives in this conversation once the recipient's user lets it answer"
+
+
+def test_inbox_lists_sent_messages_with_their_state(messaging_app: server.Server) -> None:
+    app = messaging_app
+    app.store.register('peer-0001', {'name': 'peer'})
+    app.call_tool('remote_send', {'session': 'peer', 'body': 'first question'})
+    sent = app.store.pending('peer-0001')[0]
+    text, _ = app.call_tool('remote_inbox', {})
+    assert text.split('\n')[0] == 'inbox · 0 new · 0 delivered · 1 sent'
+    sent_block = text.split('--- sent ---\n')[1].split('\n')
+    assert sent_block[0].split() == ['to', 'sent', 'state', 'message']
+    assert sent_block[1].split()[0] == 'local/peer' and sent_block[1].split()[2:] == ['waiting', 'first', 'question']
+    assert sent['id'] not in text
+
+    app.store.claim('peer-0001', sent['id'])
+    text, _ = app.call_tool('remote_inbox', {})
+    assert text.split('--- sent ---\n')[1].split('\n')[1].split()[2] == 'read'
+
+    time.sleep(0.003)
+    app.store.deliver({**relay.new_message('peer-0001', 'peer', app.hostname, 'sid-0001', 'the answer'), 'sent_at': '2026-10-11T12:00:00+00:00'})
+    text, _ = app.call_tool('remote_inbox', {})
+    assert text.split('--- sent ---\n')[1].split('\n')[1].split()[2] == 'answered'
+
+
+def test_inbox_checks_remote_receipts_in_one_round_trip(messaging_app: server.Server, remote_base: Path) -> None:
+    app = messaging_app
+    master = ShellMaster()
+    commands: list[str] = []
+    real_run = master.run
+    master.run = lambda command, **kwargs: commands.append(command) or real_run(command, **kwargs)
+    session = SimpleNamespace(master=master, status='connected')
+    app.hosts['h'] = session
+    app._Server__connected = lambda tool, alias: (session, '')
+    relay.Store(remote_base).register('peer-0001', {'name': 'peer'})
+    for body in ('one', 'two', 'three'):
+        app.call_tool('remote_send', {'alias': 'h', 'session': 'peer', 'body': body})
+    relay.Store(remote_base).claim('peer-0001', relay.Store(remote_base).pending('peer-0001')[0]['id'])
+    commands.clear()
+    text, _ = app.call_tool('remote_inbox', {})
+    assert len(commands) == 1
+    states = [line.split()[2] for line in text.split('--- sent ---\n')[1].split('\n')[1:]]
+    assert states == ['read', 'waiting', 'waiting']
+    assert text.split('--- sent ---\n')[1].split('\n')[1].split()[0] == 'h/peer'
+
+
+def test_inbox_shows_unknown_when_the_host_is_gone(messaging_app: server.Server, remote_base: Path) -> None:
+    app = messaging_app
+    relay.Store(remote_base).register('peer-0001', {'name': 'peer'})
+    app.call_tool('remote_send', {'alias': 'h', 'session': 'peer', 'body': 'one'})
+    app._Server__connected = lambda tool, alias: (None, 'x')
+    app.hosts.clear()
+    text, is_error = app.call_tool('remote_inbox', {})
+    assert not is_error and text.split('--- sent ---\n')[1].split('\n')[1].split()[2] == 'unknown'
+
+
+def test_send_attaches_files_to_a_local_recipient(messaging_app: server.Server, tmp_path: Path) -> None:
+    app = messaging_app
+    app.store.register('peer-0001', {'name': 'peer'})
+    app.runtime.update_owner(cwd=str(tmp_path))
+    (tmp_path / 'notes.txt').write_text('contents')
+    text, is_error = app.call_tool('remote_send', {'session': 'peer', 'body': 'see file', 'files': ['notes.txt']})
+    assert not is_error and 'attachments: 1 file, 1 KB\n' in text
+    [msg] = app.store.pending('peer-0001')
+    [path] = msg['attachments']
+    assert Path(path).read_text() == 'contents' and Path(path).parent == app.store.base / 'attachments' / msg['id']
+    assert f'attachments: {path}\n' in inbox.format_message(msg)
+
+
+def test_send_attaches_files_on_the_remote_host(messaging_app: server.Server, remote_base: Path, tmp_path: Path) -> None:
+    app = messaging_app
+    relay.Store(remote_base).register('peer-0001', {'name': 'peer'})
+    (tmp_path / 'data.bin').write_bytes(b'\x00\x01binary')
+    text, is_error = app.call_tool('remote_send', {'alias': 'h', 'session': 'peer', 'body': 'x', 'files': [str(tmp_path / 'data.bin')]})
+    assert not is_error, text
+    [msg] = relay.Store(remote_base).pending('peer-0001')
+    assert msg['attachments'] == [str(remote_base / 'attachments' / msg['id'] / 'data.bin')]
+    assert Path(msg['attachments'][0]).read_bytes() == b'\x00\x01binary'
+
+
+def test_send_to_a_relayed_recipient_puts_attachments_in_the_outbox_area(messaging_app: server.Server, tmp_path: Path) -> None:
+    app = messaging_app
+    app.store.register('far-0001', {'name': 'far', 'relay_via': 'machine-b'})
+    (tmp_path / 'a.txt').write_text('A')
+    text, is_error = app.call_tool('remote_send', {'session': 'far', 'body': 'x', 'files': [str(tmp_path / 'a.txt')]})
+    assert not is_error and text.startswith('send · far · queued for pickup')
+    [path] = app.store.outbox_files('far-0001')
+    msg = json.loads(path.read_text())
+    assert msg['attachment_names'] == ['a.txt'] and 'attachments' not in msg
+    assert (app.store.base / 'outbox' / 'far-0001' / 'attachments' / msg['id'] / 'a.txt').read_text() == 'A'
+
+
+def test_send_rejects_bad_attachments_before_anything_is_written(messaging_app: server.Server, tmp_path: Path) -> None:
+    app = messaging_app
+    app.store.register('peer-0001', {'name': 'peer'})
+    (tmp_path / 'dir').mkdir()
+    (tmp_path / 'big.bin').write_bytes(b'x' * (relay.MAX_ATTACH_BYTES + 1))
+    for files, reason in ((['/nonexistent/file'], 'does not exist'), ([str(tmp_path / 'dir')], 'is not a regular file'),
+                          ([str(tmp_path / 'big.bin')], 'the limit is 5242880'), ('notes.txt', 'files must be a list of paths')):
+        text, is_error = app.call_tool('remote_send', {'session': 'peer', 'body': 'x', 'files': files})
+        assert is_error and reason in text.split('\n')[1] and text.split('\n')[-1].startswith('next: attach existing regular files'), text
+    assert app.store.pending('peer-0001') == []
+
+
+def _register_session(app: server.Server, session_id: str, cwd: str = '/w/proj') -> None:
+    app.runtime.update_owner(session_id=session_id, cwd=cwd, name=f'proj-{session_id[:4]}')
+    app.sync_session_id()
+
+
+def test_resume_takes_over_the_name_and_the_unread_inbox(live_app: tuple[server.Server, list]) -> None:
+    app, calls = live_app
+    _register_session(app, 'old1-0001')
+    app.store.deliver(relay.new_message('peer-0001', 'peer', 'here', 'old1-0001', 'sent before the resume'))
+    #--- the old process ended: its teardown unregistered it, and a new process registers with a new id ---
+    app.store.unregister('old1-0001')
+    app.registered_sid = None
+    _register_session(app, 'new2-0002')
+    [entry] = app.store.sessions()
+    assert (entry['session_id'], entry['name'], entry['previous_ids']) == ('new2-0002', 'proj-old1', ['old1-0001'])
+    assert app.runtime.owner()['name'] == 'proj-old1'
+    assert [msg['body'] for msg in app.store.pending('new2-0002')] == ['sent before the resume']
+    assert relay.resolve(app.store.sessions(), 'old1-0001') is not None
+    assert relay.resolve(app.store.sessions(), 'proj-old1')['session_id'] == 'new2-0002'
+
+
+def test_clear_keeps_the_name_stable(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    _register_session(app, 'old1-0001')
+    app.runtime.update_owner(session_id='new2-0002', name='proj-new2')
+    app.sync_session_id()
+    [entry] = app.store.sessions()
+    assert (entry['name'], entry['previous_ids']) == ('proj-old1', ['old1-0001'])
+
+
+def test_two_live_sessions_in_one_directory_keep_distinct_names(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    _register_session(app, 'aaaa-0001')
+    #--- a second live Claude process (the parent of this test process) registers in the same directory ---
+    second_runtime = state.Runtime(ident.ClaudeProc(os.getppid(), 'second'))
+    second = server.Server(second_runtime, server.Config(), store=app.store, on_exit=lambda: None)
+    _register_session(second, 'bbbb-0002')
+    assert {entry['session_id']: entry['name'] for entry in app.store.sessions()} == {'aaaa-0001': 'proj-aaaa', 'bbbb-0002': 'proj-bbbb'}
+    assert app.store.take_over('/w/proj', 'cccc-0003') is None
+
+
+def test_remote_registration_carries_previous_ids_and_pulls_their_outbox(live_app: tuple[server.Server, list], monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = live_app
+    registered: list[dict] = []
+    pulls: list[str] = []
+    monkeypatch.setattr(server.relay, 'remote_register', lambda master, sid, entry: registered.append({'sid': sid, **entry}))
+    monkeypatch.setattr(server.relay, 'pull_outbox', lambda master, sid, store, timeout=30: pulls.append(sid) or store.deliver(
+        relay.new_message('r-0001', 'remote', 'gpu-a', sid, 'late')) or 1)
+    _register_session(app, 'old1-0001')
+    app.store.unregister('old1-0001')
+    app.registered_sid = None
+    app.hosts = {'gpu-a': SimpleNamespace(alias='gpu-a', status='connected', master=SimpleNamespace(alias='gpu-a'))}
+    _register_session(app, 'new2-0002')
+    assert registered[-1]['previous_ids'] == ['old1-0001'] and registered[-1]['name'] == 'proj-old1'
+    assert pulls == ['old1-0001']
+    assert [msg['body'] for msg in app.store.pending('new2-0002')] == ['late']
+
+
+def test_startup_takes_over_before_the_sweep_forgets_the_ended_session(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.store.register('old1-0001', {'name': 'proj-old1', 'cwd': '/w/proj', 'host': app.hostname, 'pid': 2 ** 22 + 11, 'started': 'x'})
+    app.runtime.update_owner(session_id='new2-0002', cwd='/w/proj')
+    app.run_startup()
+    [entry] = app.store.sessions()
+    assert (entry['session_id'], entry['name']) == ('new2-0002', 'proj-old1')
+
+
+def test_tick_asks_for_a_session_id_with_the_need_session_flag(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.tick()
+    assert app.runtime.need_session_path.exists()
+    app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
+    app.tick()
+    assert not app.runtime.need_session_path.exists()
+    assert [entry['session_id'] for entry in app.store.sessions()] == ['sid-0001']
+
+
+#---------------------------------------------------------------------
+# Runtime directory sweep
+#---------------------------------------------------------------------
+
+def _runtime_dir(base: Path, key: str, **owner: Any) -> Path:
+    run_dir = base / key
+    run_dir.mkdir(parents=True, mode=0o700)
+    state.write_json_atomic(run_dir / 'owner.json', owner)
+    return run_dir
+
+
+def test_sweep_removes_dirs_without_a_claude_pid_when_the_server_is_dead(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    base = app.runtime.dir.parent
+    dead = subprocess.Popen(['true'])
+    dead.wait()
+    stale = _runtime_dir(base, 'stale001', server_pid=dead.pid)
+    reloaded = _runtime_dir(base, 'alive001', server_pid=os.getpid())
+    unknown = _runtime_dir(base, 'empty001')
+    with_dead_claude = _runtime_dir(base, 'dead0001', claude_pid=dead.pid, claude_proc_start='1', server_pid=os.getpid())
+    app.sweep()
+    assert not stale.exists() and not with_dead_claude.exists()
+    assert reloaded.exists() and unknown.exists() and app.runtime.dir.exists()

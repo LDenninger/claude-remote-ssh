@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `remote_send` takes `files`, up to 10 local files of 5 MB in total, copied over the existing
+  connection to `attachments/<message id>/` in the recipient's message store and listed in the
+  delivered message under `attachments:`. A recipient that pulls from a host outbox receives them
+  with the message.
+- `remote_inbox` lists the messages this session sent with a state: `waiting`, `read` or `answered`.
+  A host's states cost one ssh round trip per call.
+- A session keeps its name across `--resume` and `/clear` in the same directory. The new registration
+  takes over the name, moves the unread inbox and carries `previous_ids`, so messages to an old id or
+  name reach it, on the host too.
+- A server that has no session id (plugin loaded with `/reload-plugins`) raises a `need-session`
+  flag, and the next prompt or tool-call hook writes the id from its payload, so the session registers.
+
+### Changed
+
+- `remote_send` reports `delivered` and that the reply arrives in this conversation, without the
+  message id and route. An unknown target lists the current session names and why it may be missing.
+- `remote_sessions` marks the caller's own registration `(this session)` and names the machine it runs on.
+
+### Fixed
+
+- A message of about 1 800 characters arrived cut off mid-word while `remote_send` reported success.
+  Claude Code 2.1.296 cuts a monitor line at 500 characters and a monitor event at 3 000, and hook
+  context at 8 000 characters and 200 lines. The monitor wraps long lines and prints a one-line
+  notice for a message above 2 800 characters, and the hook injects a notice above 7 440 characters
+  or 190 lines. `remote_inbox` shows the full text.
+- Runtime directories whose `owner.json` has no `claude_pid` were never removed. They are removed
+  when their server process is dead.
+
 ## [0.1.1] - 2026-10-11
 
 ### Fixed

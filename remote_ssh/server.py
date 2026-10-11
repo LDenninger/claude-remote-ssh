@@ -149,13 +149,14 @@ TOOLS: list[dict[str, Any]] = [
                 'alias': ALIAS_SCHEMA,
                 'session': {'type': 'string', 'description': 'Session name or id prefix.'},
                 'body': {'type': 'string'},
+                'files': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Local files to attach, at most 10 and 5 MB in total.'},
             },
             'required': ['session', 'body'],
         },
     },
     {
         'name': 'remote_inbox',
-        'description': 'Show new and recent messages for this session.',
+        'description': 'Show new and recent messages for this session, and whether the messages it sent were read or answered.',
         'inputSchema': {'type': 'object', 'properties': {}},
     },
 ]
@@ -631,12 +632,18 @@ class Server:
         own = self.session_id()
         rows = []
         for entry in sessions:
-            status = 'this session' if entry.get('session_id') == own else f'via {relay.clean_text(entry["relay_via"])}' if entry.get('relay_via') else '-'
-            rows.append([relay.clean_text(entry.get('name')), relay.clean_text(entry.get('session_id'), 8), relay.clean_text(entry.get('cwd')), status])
+            name, cwd = relay.clean_text(entry.get('name')), relay.clean_text(entry.get('cwd'))
+            if entry.get('session_id') == own:
+                #--- on a host, the own entry is a relay registration of a session that runs here ---
+                name, cwd = f'{name} (this session)', f'{self.hostname}:{cwd}' if alias else cwd
+                status = f'runs on {self.hostname}' if alias else 'this session'
+            else:
+                status = f'via {relay.clean_text(entry["relay_via"])}' if entry.get('relay_via') else '-'
+            rows.append([name, relay.clean_text(entry.get('session_id'), 8), cwd, status])
         return fmt.compose(fmt.head('sessions', alias, len(sessions)), fmt.table(['name', 'id', 'cwd', 'status'], rows) if rows else ''), False
 
     def tool_remote_send(self, args: dict[str, Any]) -> tuple[str, bool]:
-        """Send `args.body` to `args.session`, on `args.alias` or locally."""
+        """Send `args.body` and the optional `args.files` to `args.session`, on `args.alias` or locally."""
         alias = args.get('alias')
         own = self.session_id()
         if not own:
@@ -653,28 +660,55 @@ class Server:
             sessions = self.store.sessions()
         target = relay.resolve(sessions, args['session'])
         if target is None:
-            return fmt.error('send', alias, f'no session {relay.clean_text(args["session"])!r} on {alias or "this machine"}',
-                             f'call remote_sessions{f"({alias!r})" if alias else ""} and pick a listed name or id'), True
+            names = ', '.join(sorted({relay.clean_text(entry.get('name')) for entry in sessions})) or 'none'
+            return fmt.error('send', alias, f'no session {relay.clean_text(args["session"])!r} on {alias or "this machine"}: it may have ended, '
+                                            'been resumed under a new id, or the name may be wrong',
+                             f'pick one of the listed names, or call remote_sessions{f"({alias!r})" if alias else ""} again',
+                             ('sessions', names)), True
         body_chars = len(args['body'])
         if body_chars > relay.MAX_BODY_CHARS:
             return fmt.error('send', alias, f'body is {body_chars} characters, the limit is {relay.MAX_BODY_CHARS}',
-                             'shorten the body or send a file path'), True
+                             'shorten the body or attach it as a file'), True
         owner = self.runtime.owner()
+        try:
+            files = relay.check_attachments(args['files'], owner.get('cwd', '')) if args.get('files') else []
+        except ValueError as exc:
+            return fmt.error('send', alias, relay.clean_text(exc, 300), f'attach existing regular files, at most {relay.MAX_ATTACH_FILES} and {relay.MAX_ATTACH_BYTES // 2 ** 20} MB in total'), True
         msg = relay.new_message(own, owner.get('name', ''), self.hostname, target['session_id'], args['body'])
+        queued = bool(target.get('relay_via'))
+        contents = [(name, source.read_bytes()) for source, name in files]
+        if files:
+            if session is not None:
+                paths = relay.remote_attach(session.master, msg['id'], files, target['session_id'] if queued else None)
+            else:
+                paths = self.store.attach(msg['id'], contents, f'outbox/{target["session_id"]}/attachments' if queued else 'attachments')
+            #--- the machine that pulls from an outbox lists its own paths, so the message carries the names ---
+            msg.update({'attachment_names': [name for _, name in files]} if queued else {'attachments': paths})
         route = relay.remote_send(session.master, msg, target) if session is not None else self.store.send(msg)
-        return fmt.compose(fmt.head('send', alias, relay.clean_text(target.get('name'))), *fmt.fields(('id', msg['id']), ('route', route))), False
+        name = relay.clean_text(target.get('name'))
+        try:
+            self.store.log_sent(msg, name, alias, route)
+        except Exception:
+            LOG.exception('logging the sent message failed')
+        sizes = sum(len(content) for _, content in contents)
+        return fmt.compose(
+            fmt.head('send', alias, name, 'queued for pickup' if queued else 'delivered'),
+            *fmt.fields(('attachments', f'{fmt.count(len(files), "file")}, {sizes // 1024 + 1} KB' if files else None),
+                        ('reply', "arrives in this conversation once the recipient's user lets it answer"))), False
 
     def tool_remote_inbox(self, args: dict[str, Any]) -> tuple[str, bool]:
-        """Claim and show new messages, then list recently delivered ones."""
+        """Claim and show new messages, list recently delivered ones and the state of the sent ones."""
         own = self.session_id()
         if not own:
             return fmt.error('inbox', None, 'own session id unknown (SessionStart hook has not run)', 'submit another prompt, then retry'), True
         delivered = self.store.read_messages(own)
         new_msgs = inbox.claim_pending(self.store, own, limit=None)
+        sent = self.__sent_rows(own)
         return fmt.compose(
-            fmt.head('inbox', None, f'{len(new_msgs)} new', f'{len(delivered)} delivered'),
+            fmt.head('inbox', None, f'{len(new_msgs)} new', f'{len(delivered)} delivered', f'{len(sent)} sent' if sent else None),
             fmt.block('new', '\n'.join(inbox.format_row(msg) for msg in new_msgs)),
             fmt.block('delivered', '\n'.join(inbox.format_row(msg) for msg in delivered)),
+            fmt.block('sent', fmt.table(['to', 'sent', 'state', 'message'], sent) if sent else ''),
         ), False
 
     #---------------------------------------------------------------------
@@ -762,10 +796,10 @@ class Server:
         try:
             self.runtime.update_owner(server_pid=os.getpid())
             self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, messaging=self.config.messaging, ssh_opts=self.config.ssh_opts))
-            self.sweep()
-            targets = self.__recover_previous()
             self._autoconnect_sid = self.wait_session_id(OWNER_WAIT_S)
             self.sync_session_id()
+            self.sweep()
+            targets = self.__recover_previous()
             targets.extend(self.__autoconnect_targets())
             self.runtime.update_owner(autoconnect_read=True)
         except Exception:
@@ -840,6 +874,7 @@ class Server:
             self.__disconnect_all(keep_in_state=True)
             if self.runtime is not None:
                 self.runtime.pending_path.unlink(missing_ok=True)
+                self.runtime.need_session_path.unlink(missing_ok=True)
             self._torn_down = True
 
     def end_session(self) -> None:
@@ -856,9 +891,17 @@ class Server:
             memory.cache_path(self.runtime.dir, alias).unlink(missing_ok=True)
 
     def update_pending_flag(self) -> None:
-        """Create the pending flag while this session's inbox holds messages, remove it otherwise."""
+        """Keep the pending and need-session flags current for the hook commands.
+
+        The pending flag exists while this session's inbox holds messages. The need-session flag
+        exists while owner.json holds no session id, which asks the next message hook to write it.
+        """
         try:
             session_id = self.session_id()
+            if session_id:
+                self.runtime.need_session_path.unlink(missing_ok=True)
+            else:
+                self.runtime.need_session_path.touch()
             if session_id and self.store.has_pending(session_id):
                 self.runtime.pending_path.touch()
             else:
@@ -880,9 +923,14 @@ class Server:
                 live_sids.add(owner.get('session_id'))
                 continue
             pid, start = owner.get('claude_pid'), owner.get('claude_proc_start')
-            if not pid or not start:
-                continue
-            if ident.alive(ident.ClaudeProc(int(pid), str(start))):
+            if pid and start:
+                dead = not ident.alive(ident.ClaudeProc(int(pid), str(start)))
+            else:
+                #--- a session that only ran /reload-plugins has no Claude pid: its server decides ---
+                server_pid = owner.get('server_pid')
+                dead = bool(server_pid) and not relay.is_pid_alive(server_pid)
+                pid = pid or server_pid
+            if not dead:
                 live_sids.add(owner.get('session_id'))
                 continue
             LOG.info('sweeping %s (owner %s dead)', run_dir, pid)
@@ -901,11 +949,13 @@ class Server:
     def sync_session_id(self) -> None:
         """Register the session id from owner.json, replacing an older registration.
 
-        `/clear` keeps the Claude process and the server but makes SessionStart write a
-        new session id. The old id is unregistered locally and on every connected host,
-        and the new one registered in its place. Messages still unread under the old id,
-        local ones and those waiting in a host's outbox, move to the new id's inbox. Does
-        nothing with messaging off or while the id is unknown or unchanged.
+        `/clear` keeps the Claude process and the server but makes SessionStart write a new session
+        id, and `--resume` starts a new process with a new id. The new registration takes over the
+        name of the session that ended in the same directory, and keeps the ids it replaced in
+        `previous_ids`, so messages for an old id or name reach the new session. The old id is
+        unregistered locally and on every connected host. Messages still unread under an old id,
+        local ones and those waiting in a host's outbox, move to the new id's inbox. Does nothing
+        with messaging off or while the id is unknown or unchanged.
         """
         if not self.config.messaging:
             return
@@ -916,6 +966,10 @@ class Server:
             if old_sid:
                 LOG.info('session id changed from %s to %s, re-registering', old_sid, session_id)
                 self.store.unregister(old_sid)
+            cwd = self.runtime.owner().get('cwd', '')
+            taken = self.store.take_over(cwd, session_id) if cwd else None
+            previous = list(dict.fromkeys([*(taken['previous_ids'] if taken else []), *([old_sid] if old_sid else [])]))
+            self.runtime.update_owner(name=taken['name'] if taken and taken.get('name') else relay.session_name(cwd, session_id), previous_ids=previous)
             self.store.register(session_id, self.__session_entry(session_id))
             self.registered_sid = session_id
             with self.lock:
@@ -924,13 +978,12 @@ class Server:
                 if old_sid:
                     try:
                         relay.remote_unregister(session.master, old_sid)
-                        relay.pull_outbox(session.master, old_sid, self.store, timeout=POLL_PULL_TIMEOUT_S)
                     except Exception:
-                        LOG.exception('%s: unregister or final pull of %s failed', session.alias, old_sid)
+                        LOG.exception('%s: unregister of %s failed', session.alias, old_sid)
                 for warning in self.__register_remote(session, session_id):
                     LOG.warning('%s: %s', session.alias, warning)
-            if old_sid:
-                self.__move_inbox(old_sid, session_id)
+            for prev in previous:
+                self.__move_inbox(prev, session_id)
 
     def wait_session_id(self, timeout: float) -> str | None:
         """Poll owner.json for the session id for up to `timeout` seconds."""
@@ -957,12 +1010,42 @@ class Server:
 
     def __move_inbox(self, old_sid: str, new_sid: str) -> None:
         """Move the unread messages of `old_sid` into the inbox of `new_sid`, addressed to it."""
-        for msg in self.store.pending(old_sid):
+        try:
+            self.store.move_inbox(old_sid, new_sid)
+        except Exception:
+            LOG.exception('moving the messages of %s to %s failed', old_sid, new_sid)
+
+    def __sent_rows(self, own: str) -> list[list[str]]:
+        """Return a table row per recent message this session sent: recipient, time, state, start of the body.
+
+        The state is `waiting` (unread in the recipient's inbox), `read`, or `answered` (a message
+        from the recipient arrived after it). A host's states cost one ssh round trip, and an
+        unreachable host shows `unknown`.
+        """
+        entries = self.store.sent_log(own)
+        states = {}
+        for alias in dict.fromkeys(entry.get('alias') for entry in entries):
+            group = [entry for entry in entries if entry.get('alias') == alias]
             try:
-                self.store.deliver({**msg, 'to_session': new_sid})
-                (self.store.base / 'inbox' / old_sid / f'{msg["id"]}.json').unlink(missing_ok=True)
+                session = self.hosts.get(alias) if alias else None
+                if alias:
+                    results = relay.remote_receipts(session.master, group) if session is not None and session.status == 'connected' else ['unknown'] * len(group)
+                else:
+                    results = [self.store.local_receipt(entry) for entry in group]
             except Exception:
-                LOG.exception('moving message %s to %s failed', msg.get('id'), new_sid)
+                LOG.exception('receipts of %s failed', alias)
+                results = ['unknown'] * len(group)
+            states.update({entry['id']: result for entry, result in zip(group, results)})
+        received = self.store.read_messages(own, relay.MAX_READ_KEPT)
+        rows = []
+        for entry in entries:
+            alias, answered = entry.get('alias'), False
+            for msg in received:
+                same_name = msg.get('from_name') == entry.get('to_name') and (msg.get('relayed_from') == alias if alias else msg.get('from_host') == self.hostname)
+                answered = answered or (msg['id'] > entry['id'] and (msg.get('from_session') == entry['to_session'] or same_name))
+            rows.append([f'{alias or "local"}/{relay.clean_text(entry.get("to_name"))}', inbox.sent_at(entry, time_only=True),
+                         'answered' if answered else states[entry['id']], relay.clean_text(entry.get('preview'), 48)])
+        return rows
 
     def __not_connected(self, tool: str, alias: str) -> str:
         """Return the error text for an alias that is not connected, naming the connected ones."""
@@ -1051,6 +1134,7 @@ class Server:
             'host': self.hostname,
             'pid': self.runtime.claude.pid,
             'started': self.started,
+            'previous_ids': owner.get('previous_ids', []),
         }
 
     def __register_remote(self, session: HostSession, session_id: str | None) -> list[str]:
@@ -1070,6 +1154,9 @@ class Server:
         try:
             machine = state.machine_id()
             relay.remote_register(session.master, session_id, {**self.__session_entry(session_id), 'relay_via': machine})
+            for prev in self.runtime.owner().get('previous_ids', []):
+                relay.pull_outbox(session.master, prev, self.store, timeout=POLL_PULL_TIMEOUT_S)
+                self.__move_inbox(prev, session_id)
             relay.remote_cleanup(session.master, machine, self.live_session_ids())
         except Exception as exc:
             LOG.exception('%s: remote registration failed', session.alias)

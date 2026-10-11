@@ -199,11 +199,13 @@ def test_sessions_table(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> 
         {'name': 'far', 'session_id': 'far00001', 'cwd': '/x', 'relay_via': 'laptop'}])
     text, is_error = app.call_tool('remote_sessions', {'alias': 'gpu'})
     assert not is_error
-    assert text.split('\n') == ['sessions gpu · 3',
-                                'name        id        cwd      status',
-                                'train-befb  befb02c8  ~/train  -',
-                                'me          sid-0001  /w       this session',
-                                'far         far00001  /x       via laptop']
+    host = app.hostname
+    lines = text.split('\n')
+    assert lines[0] == 'sessions gpu · 3'
+    assert lines[1].split() == ['name', 'id', 'cwd', 'status']
+    assert lines[2].split() == ['train-befb', 'befb02c8', '~/train', '-']
+    assert lines[3].split() == ['me', '(this', 'session)', 'sid-0001', f'{host}:/w', 'runs', 'on', host]
+    assert lines[4].split() == ['far', 'far00001', '/x', 'via', 'laptop']
 
 
 def test_sessions_local_and_empty(app: server.Server) -> None:
@@ -214,12 +216,13 @@ def test_send_shape_and_errors(app: server.Server) -> None:
     app.store.register('peer-0001', {'name': 'train-befb'})
     text, is_error = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'hi'})
     assert not is_error
-    assert re.fullmatch(r'send · train-befb\nid: \d+-[0-9a-f]{8}\nroute: inbox', text)
+    assert text == "send · train-befb · delivered\nreply: arrives in this conversation once the recipient's user lets it answer"
     text, _ = app.call_tool('remote_send', {'session': 'nobody', 'body': 'hi'})
-    assert_error(text, 'send', None, "no session 'nobody' on this machine")
+    assert_error(text, 'send', None, "no session 'nobody' on this machine: it may have ended, been resumed under a new id, or the name may be wrong")
+    assert 'sessions: train-befb\n' in text
     text, _ = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'x' * 8001})
     assert_error(text, 'send', None, 'body is 8001 characters, the limit is 8000')
-    assert text.endswith('next: shorten the body or send a file path')
+    assert text.endswith('next: shorten the body or attach it as a file')
     app.config.messaging = False
     text, _ = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'hi'})
     assert_error(text, 'send', None, 'messaging is disabled in the plugin options')

@@ -98,7 +98,12 @@ Send Bash to gpu-a and run the tests there.
 ```
 
 A message reaches the other session through a monitor in interactive sessions, otherwise with that
-session's next prompt or tool call.
+session's next prompt or tool call. A message too long to show in one monitor event or one prompt
+arrives as a one-line notice, and the full text is in `remote_inbox`. A session keeps its name when
+it is resumed or cleared in the same directory, so a message to the old name or id still arrives.
+`remote_send` takes up to 10 `files` of 5 MB in total, which land under `attachments/` in the
+recipient's message store. `remote_inbox` also lists the messages this session sent, each `waiting`,
+`read` or `answered`.
 
 ### Example exchange
 
@@ -129,8 +134,8 @@ at: 2026-10-11 09:14:02Z
 | `remote_exec` | alias, command, cwd?, timeout_s? | stdout, stderr, exit code |
 | `remote_mode` | alias or null | redirect target |
 | `remote_sessions` | alias? | sessions on that host, or locally |
-| `remote_send` | alias?, session, body | message id |
-| `remote_inbox` | none | received messages |
+| `remote_send` | alias?, session, body, files? | delivery confirmation |
+| `remote_inbox` | none | received messages, state of sent messages |
 
 ## ⚙️ Configuration
 

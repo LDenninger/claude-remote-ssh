@@ -19,6 +19,9 @@ from pathlib import Path
 TRUNCATE = 30_000
 KILL_AFTER_S = 5
 EXEC_GRACE_S = 15
+#--- every ssh call except the master must never become a master itself: a user config with
+#--- `ControlMaster auto` would otherwise start an unowned persistent master at our socket ---
+NO_MASTER = ['-o', 'ControlMaster=no']
 
 
 class ConnectError(Exception):
@@ -102,7 +105,7 @@ def exec_argv(ctl: Path, host: str, command: str, cwd: str | None, extra: list[s
     remote = remote_shell(command, cwd, login)
     if remote_timeout:
         remote = with_remote_timeout(remote, remote_timeout)
-    return ['ssh', '-S', str(ctl), '-o', 'BatchMode=yes', *(extra or []), '-T', '--', host, remote]
+    return ['ssh', '-S', str(ctl), '-o', 'BatchMode=yes', *NO_MASTER, *(extra or []), '-T', '--', host, remote]
 
 
 def tail(s: str, n: int = TRUNCATE) -> str:
@@ -184,7 +187,7 @@ class Master:
         """Return whether the control socket answers `ssh -O check`."""
         if not self.ctl.exists():
             return False
-        argv = ['ssh', '-S', str(self.ctl), *self.extra, '-O', 'check', '--', self.host]
+        argv = ['ssh', '-S', str(self.ctl), *NO_MASTER, *self.extra, '-O', 'check', '--', self.host]
         try:
             result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
@@ -209,7 +212,7 @@ class Master:
         """Close the master, kill its process if needed and remove the socket. Never raises."""
         try:
             if self.ctl.exists():
-                subprocess.run(['ssh', '-S', str(self.ctl), *self.extra, '-O', 'exit', '--', self.host],
+                subprocess.run(['ssh', '-S', str(self.ctl), *NO_MASTER, *self.extra, '-O', 'exit', '--', self.host],
                                stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -276,6 +279,6 @@ class Master:
             stderr += f'\n[exit 124: timed out after {timeout}s, or the command itself returned 124]'
         return stdout, stderr, result.returncode
 
-    def ssh_command(self) -> str:
-        """Return the ssh command line that reuses this master, for sshfs `ssh_command`."""
-        return f'ssh -S {self.ctl} -o BatchMode=yes'
+    def ssh_argv(self) -> list[str]:
+        """Return the ssh argv prefix that reuses this master without ever becoming a master."""
+        return ['ssh', '-S', str(self.ctl), '-o', 'BatchMode=yes', *NO_MASTER, *self.extra]

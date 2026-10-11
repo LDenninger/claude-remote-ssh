@@ -379,3 +379,185 @@ def test_pull_outbox_drops_a_file_larger_than_the_budget(remote_base: Path, tmp_
     remote_store.send({**_stamped_msg('ok', to='local-sid'), 'id': '1001-00000001'})
     assert relay.pull_outbox(FakeMaster(), 'local-sid', local) == 1
     assert remote_store.outbox_files('local-sid') == []
+
+
+#---------------------------------------------------------------------
+# Long bodies reach the recipient whole
+#---------------------------------------------------------------------
+
+@pytest.mark.parametrize('chars', [1800, 7900])
+def test_remote_deliver_keeps_long_bodies_with_newlines_and_quotes(remote_base: Path, chars: int) -> None:
+    line = 'He said "stop" and it\'s `$HOME` \\n done; rm -rf * # \'\'\' """\n'
+    body = (line * (chars // len(line) + 1))[:chars]
+    master = FakeMaster()
+    msg = _msg('peer-0001', body)
+    relay.remote_deliver(master, msg)
+    stored = json.loads((remote_base / 'inbox' / 'peer-0001' / f'{msg["id"]}.json').read_text())
+    assert stored['body'] == body
+
+
+#---------------------------------------------------------------------
+# Stable names across resume
+#---------------------------------------------------------------------
+
+def test_resolve_follows_previous_ids() -> None:
+    sessions = [{'session_id': 'new-0002', 'name': 'proj-old1', 'previous_ids': ['old-0001']}]
+    assert relay.resolve(sessions, 'old-0001') is sessions[0]
+    assert relay.resolve(sessions, 'proj-old1') is sessions[0]
+    assert relay.resolve(sessions, 'gone-0000') is None
+
+
+def _entry(cwd: str = '/w/proj', name: str = 'proj-old1', pid: int | None = None, **fields: object) -> dict:
+    return {'name': name, 'cwd': cwd, 'host': socket.gethostname(), 'pid': pid if pid is not None else os.getpid(), 'started': '2026-10-11T10:00:00+00:00', **fields}
+
+
+def test_unregister_retires_the_entry_and_register_drops_the_copy(store: Store) -> None:
+    store.register('old-0001', _entry())
+    store.unregister('old-0001')
+    assert store.sessions() == [] and (store.base / 'ended' / 'old-0001.json').exists()
+    store.register('old-0001', _entry())
+    assert not (store.base / 'ended' / 'old-0001.json').exists()
+    store.unregister('old-0001', retire=False)
+    assert not (store.base / 'ended').exists() or not list((store.base / 'ended').glob('*.json'))
+
+
+def test_take_over_claims_the_name_of_a_session_that_ended_in_the_same_directory(store: Store) -> None:
+    store.register('old-0001', _entry())
+    store.unregister('old-0001')
+    taken = store.take_over('/w/proj', 'new-0002')
+    assert taken == {'name': 'proj-old1', 'previous_ids': ['old-0001']}
+    assert store.take_over('/w/proj', 'new-0003') is None
+
+
+def test_take_over_chains_previous_ids(store: Store) -> None:
+    store.register('mid-0002', _entry(name='proj-old1', previous_ids=['old-0001']))
+    store.unregister('mid-0002')
+    assert store.take_over('/w/proj', 'new-0003')['previous_ids'] == ['old-0001', 'mid-0002']
+
+
+def test_take_over_claims_a_dead_registration_and_leaves_live_and_foreign_ones(store: Store) -> None:
+    dead = subprocess.Popen(['true'])
+    dead.wait()
+    store.register('dead-0001', _entry(pid=dead.pid, name='proj-dead'))
+    store.register('live-0002', _entry(name='proj-live'))
+    store.register('other-0003', _entry(cwd='/w/other', pid=dead.pid, name='other-dead'))
+    store.register('relay-0004', {**_entry(pid=dead.pid, name='proj-rel'), 'relay_via': 'machine-b'})
+    assert store.take_over('/w/proj', 'new-0005') == {'name': 'proj-dead', 'previous_ids': ['dead-0001']}
+    assert sorted(entry['session_id'] for entry in store.sessions()) == ['live-0002', 'other-0003', 'relay-0004']
+    assert store.take_over('/w/proj', 'new-0006') is None
+
+
+def test_take_over_never_claims_its_own_entry(store: Store) -> None:
+    store.register('same-0001', _entry())
+    store.unregister('same-0001')
+    assert store.take_over('/w/proj', 'same-0001') is None
+
+
+def test_move_inbox_readdresses_unread_messages(store: Store) -> None:
+    store.deliver(_msg('old-0001', 'unread'))
+    store.move_inbox('old-0001', 'new-0002')
+    assert not store.has_pending('old-0001')
+    assert [(msg['to_session'], msg['body']) for msg in store.pending('new-0002')] == [('new-0002', 'unread')]
+
+
+#---------------------------------------------------------------------
+# Sent log and delivery states
+#---------------------------------------------------------------------
+
+def test_sent_log_keeps_the_latest_hundred_of_one_sender(store: Store) -> None:
+    for ii in range(103):
+        msg = {**_msg('peer-0001', f'body {ii}'), 'id': f'{1000 + ii}-{ii:08x}'}
+        store.log_sent(msg, 'peer', None, 'inbox')
+    store.log_sent({**_msg('peer-0001'), 'from_session': 'someone-else', 'id': '9999-00000000'}, 'peer', None, 'inbox')
+    log = store.sent_log('sender-0000', limit=500)
+    assert len(log) == 99 and log[-1]['preview'] == 'body 102'
+    assert len(list((store.base / 'sent').glob('*.json'))) == 100
+
+
+def test_local_receipt_follows_the_message(store: Store) -> None:
+    store.register('peer-0001', {'name': 'peer'})
+    msg = _msg('peer-0001')
+    store.send(msg)
+    store.log_sent(msg, 'peer', None, 'inbox')
+    [entry] = store.sent_log('sender-0000')
+    assert store.local_receipt(entry) == 'waiting'
+    store.claim('peer-0001', msg['id'])
+    assert store.local_receipt(entry) == 'read'
+    #--- the recipient was resumed under a new id and its inbox moved with it ---
+    moved = _msg('peer-0001')
+    store.send(moved)
+    store.unregister('peer-0001')
+    store.register('peer-0002', {'name': 'peer', 'previous_ids': ['peer-0001']})
+    store.move_inbox('peer-0001', 'peer-0002')
+    assert store.local_receipt({'id': moved['id'], 'to_session': 'peer-0001', 'route': 'inbox'}) == 'waiting'
+    assert store.local_receipt({'id': moved['id'], 'to_session': 'gone-0009', 'route': 'inbox'}) == 'unknown'
+
+
+def test_local_receipt_of_an_outbox_message(store: Store) -> None:
+    store.register('far-0001', {'name': 'far', 'relay_via': 'machine-b'})
+    msg = _msg('far-0001')
+    assert store.send(msg) == 'outbox'
+    entry = {'id': msg['id'], 'to_session': 'far-0001', 'route': 'outbox'}
+    assert store.local_receipt(entry) == 'waiting'
+    store.outbox_files('far-0001')[0].unlink()
+    assert store.local_receipt(entry) == 'delivered'
+
+
+def test_remote_receipts_take_one_round_trip(remote_base: Path) -> None:
+    remote = Store(remote_base)
+    remote.register('peer-0001', {'name': 'peer'})
+    remote.register('far-0002', {'name': 'far', 'relay_via': 'machine-b'})
+    waiting, read, outbox = _msg('peer-0001'), _msg('peer-0001'), _msg('far-0002')
+    remote.send(waiting)
+    remote.send(read)
+    remote.claim('peer-0001', read['id'])
+    remote.send(outbox)
+    entries = [{'id': waiting['id'], 'to_session': 'peer-0001', 'route': 'inbox'}, {'id': read['id'], 'to_session': 'peer-0001', 'route': 'inbox'},
+               {'id': 'nope-00000000', 'to_session': 'peer-0001', 'route': 'inbox'}, {'id': outbox['id'], 'to_session': 'far-0002', 'route': 'outbox'}]
+    master = FakeMaster()
+    assert relay.remote_receipts(master, entries) == ['waiting', 'read', 'unknown', 'waiting']
+    assert len(master.commands) == 1
+    assert relay.remote_receipts(master, []) == [] and len(master.commands) == 1
+
+
+#---------------------------------------------------------------------
+# Attachments
+#---------------------------------------------------------------------
+
+def test_check_attachments_names_and_limits(tmp_path: Path) -> None:
+    (tmp_path / 'sub').mkdir()
+    for name in ('a.txt', 'sub/a.txt', '.hidden', 'we ird$name.bin'):
+        (tmp_path / name).write_text('x')
+    files = relay.check_attachments(['a.txt', 'sub/a.txt', '.hidden', 'we ird$name.bin'], str(tmp_path))
+    assert [name for _, name in files] == ['a.txt', '1-a.txt', 'hidden', 'we_ird_name.bin']
+    for bad, text in ((['missing.txt'], 'does not exist'), (['sub'], 'not a regular file'), ('a.txt', 'must be a list'), ([''], 'must be a list'),
+                      (['a.txt'] * (relay.MAX_ATTACH_FILES + 1), 'the limit is 10')):
+        with pytest.raises(ValueError, match=text):
+            relay.check_attachments(bad, str(tmp_path))
+    (tmp_path / 'big.bin').write_bytes(b'x' * (relay.MAX_ATTACH_BYTES + 1))
+    with pytest.raises(ValueError, match='total'):
+        relay.check_attachments(['big.bin'], str(tmp_path))
+
+
+def test_remote_attach_returns_the_remote_paths(remote_base: Path, tmp_path: Path) -> None:
+    (tmp_path / 'data.bin').write_bytes(bytes(range(256)) * 10)
+    files = relay.check_attachments(['data.bin'], str(tmp_path))
+    [path] = relay.remote_attach(FakeMaster(), 'msg-0001', files)
+    assert Path(path) == remote_base / 'attachments' / 'msg-0001' / 'data.bin'
+    assert Path(path).read_bytes() == bytes(range(256)) * 10
+
+
+def test_attachments_for_a_relayed_recipient_are_pulled_with_the_message(remote_base: Path, store: Store, tmp_path: Path) -> None:
+    (tmp_path / 'img.bin').write_bytes(b'\x00\xff\n\x00data')
+    files = relay.check_attachments(['img.bin'], str(tmp_path))
+    msg = {**_msg('here-0001', 'see file'), 'attachment_names': ['img.bin'], 'attachments': ['/etc/passwd']}
+    master = FakeMaster()
+    relay.remote_attach(master, msg['id'], files, to_sid='here-0001')
+    relay.remote_deliver(master, msg, 'outbox')
+    assert relay.pull_outbox(master, 'here-0001', store) == 1
+    [pulled] = store.pending('here-0001')
+    [local_path] = pulled['attachments']
+    assert Path(local_path) == store.base / 'attachments' / msg['id'] / 'img.bin'
+    assert Path(local_path).read_bytes() == b'\x00\xff\n\x00data'
+    assert 'attachment_names' not in pulled
+    assert not (remote_base / 'outbox' / 'here-0001' / 'attachments' / msg['id']).exists()

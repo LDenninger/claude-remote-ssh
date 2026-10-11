@@ -35,7 +35,7 @@ claude plugin validate . --strict
 
 1. Set the new version in `.claude-plugin/plugin.json`, `pyproject.toml` and `remote_ssh/__init__.py`.
 2. Rename the `Unreleased` heading in `CHANGELOG.md` to `## [x.y.z] - YYYY-MM-DD`.
-3. Commit, then tag and push: `git tag vx.y.z && git push origin main vx.y.z`.
+3. Commit, then tag and push: `git tag vx.y.z && git push origin master vx.y.z`.
 
 The release workflow reruns CI, refuses a tag that does not match the version or has no dated
 changelog section, and publishes a GitHub release with the plugin archive, its SHA-256 sum and the

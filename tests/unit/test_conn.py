@@ -197,6 +197,16 @@ def test_is_listening_tells_live_from_stale_socket(short_tmp: Path) -> None:
     assert not master.is_listening()
 
 
+def test_exited_tells_a_dead_master_process_from_a_live_one(tmp_path: Path) -> None:
+    master = Master('h', 'host', tmp_path / 'c')
+    assert not master.exited()
+    master._proc = subprocess.Popen(['sleep', '60'])
+    assert not master.exited()
+    master._proc.kill()
+    master._proc.wait()
+    assert master.exited()
+
+
 #---------------------------------------------------------------------
 # ControlMaster=no on every non-master ssh call
 #---------------------------------------------------------------------

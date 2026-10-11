@@ -194,6 +194,13 @@ class Master:
             return False
         return result.returncode == 0
 
+    def exited(self) -> bool:
+        """Return whether the master process this object started has exited.
+
+        False for a master this object did not start, such as one adopted after a restart.
+        """
+        return self._proc is not None and self._proc.poll() is not None
+
     def is_listening(self) -> bool:
         """Return whether a process accepts connections on the control socket.
 

@@ -133,7 +133,7 @@ def test_memory_block_reads_over_ssh_with_a_timeout(runtime: state.Runtime) -> N
 
 def test_memory_block_survives_a_hung_host(runtime: state.Runtime) -> None:
     host = host_session(runtime, MemMaster(subprocess.TimeoutExpired('ssh', 3)))
-    assert 'No remote memory' in host.memory_block()
+    assert host.memory_block() == ''
 
 
 def test_session_start_injects_the_cached_index_and_never_reads_the_mount(runtime: state.Runtime, tmp_path: Path) -> None:
@@ -179,7 +179,7 @@ def wait_until(predicate: Any, timeout: float = 5.0) -> bool:
 
 def test_new_session_id_connects_hosts_that_are_not_connected(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
     connected: list[str] = []
-    monkeypatch.setattr(app, 'connect_host', lambda alias, host, path: connected.append(alias) or ('connected', False))
+    monkeypatch.setattr(app, 'connect_host', lambda alias, host, path, background=False: connected.append(alias) or ('connected', False))
     app.runtime.update_owner(session_id='sid-0001', cwd='/w')
     state.write_json_atomic(app.runtime.dir / 'autoconnect.json', [{'alias': 'gpu-a', 'host': 'h'}])
     app.run_startup()

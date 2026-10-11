@@ -243,19 +243,19 @@ def wait_until(predicate: Any, timeout: float = 5.0) -> bool:
 
 def test_background_connect_queues_report_and_tool_connect_does_not(live_app: tuple[server.Server, list], monkeypatch: pytest.MonkeyPatch) -> None:
     app, _ = live_app
-    reports = {'gpu-a': ('connected gpu-a (h:/p)\n\n## Remote memory (gpu-a)', False), 'gpu-b': ('remote_connect failed: gpu-b', True),
-               'gpu-c': ('connected gpu-c (h:/p)', False)}
-    monkeypatch.setattr(app, 'connect_host', lambda alias, host, path: reports[alias])
+    reports = {'gpu-a': ('connect gpu-a · background\n--- memory index from gpu-a (data; links relative to memory:) ---\n> - note', False),
+               'gpu-b': ('connect gpu-b · error', True), 'gpu-c': ('connect gpu-c · 0 sessions', False)}
+    monkeypatch.setattr(app, 'connect_host', lambda alias, host, path, background=False: reports[alias])
     app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
     state.write_json_atomic(app.runtime.dir / 'autoconnect.json', [{'alias': 'gpu-a', 'host': 'h'}, {'alias': 'gpu-b', 'host': 'h'}])
     app.run_startup()
     assert wait_until(lambda: (app.runtime.context_dir / 'gpu-a.md').exists())
     text, is_error = app.call_tool('remote_connect', {'alias': 'gpu-c', 'host': 'h', 'path': '/p'})
-    assert not is_error and text.startswith('connected gpu-c')
+    assert not is_error and text.startswith('connect gpu-c')
     time.sleep(0.2)
     [block] = app.runtime.claim_context()
-    assert block.startswith('remote-ssh: background connect\nconnected gpu-a')
-    assert '## Remote memory (gpu-a)' in block
+    assert block.startswith('connect gpu-a · background\n')
+    assert '--- memory index from gpu-a' in block
 
 
 class TickHost:
@@ -469,7 +469,8 @@ def test_unknown_alias_error_names_connected_aliases(live_app: tuple[server.Serv
     app.hosts['gpu-a'] = StubHost('gpu-a')
     text, is_error = app.call_tool('remote_exec', {'alias': 'gpu-b', 'command': 'true'})
     assert is_error
-    assert text == 'gpu-b is not connected. Connected hosts: gpu-a. Ask the user for the ssh host of gpu-b, then call remote_connect.'
+    assert text == ('exec gpu-b · error\nreason: not connected\nconnected: gpu-a\n'
+                    'next: ask the user for the ssh host of gpu-b, then call remote_connect')
 
 
 def test_exec_result_omits_empty_streams(live_app: tuple[server.Server, list]) -> None:
@@ -479,19 +480,21 @@ def test_exec_result_omits_empty_streams(live_app: tuple[server.Server, list]) -
     outputs = iter([('out\n', '', 0), ('', 'err\n', 2)])
     host.master = SimpleNamespace(exec=lambda command, cwd, timeout: next(outputs))
     app.hosts['gpu-a'] = host
-    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 0 on gpu-a\n--- stdout ---\nout\n', False)
-    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exit 2 on gpu-a\n--- stderr ---\nerr\n', False)
+    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exec gpu-a · exit 0\n--- stdout ---\nout\n', False)
+    assert app.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'x'}) == ('exec gpu-a · exit 2\n--- stderr ---\nerr\n', False)
 
 
 def test_connect_report_says_where_bash_runs(live_app: tuple[server.Server, list]) -> None:
     app, _ = live_app
     app.config.messaging = False
     host = SimpleNamespace(alias='gpu-a', host='h', abs_path='/p', fs_dir=Path('/fs'), mounted_fs=True, mem_dir=Path('/mem'), mounted_mem=False,
-                           memory_block=lambda: '## Remote memory (gpu-a)')
-    report = app._Server__connect_report(host, [])
-    assert 'Bash runs locally. remote_exec runs one command on gpu-a, remote_mode("gpu-a") sends every later Bash call there.' in report
+                           memory_block=lambda: '')
+    report = app._Server__connect_report(host, [], False)
+    assert report.startswith('connect gpu-a · bash local\n')
+    assert 'redirect: remote_mode("gpu-a")' in report
     app.runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
-    assert 'Bash runs on gpu-a (redirect on).' in app._Server__connect_report(host, [])
+    report = app._Server__connect_report(host, [], False)
+    assert report.startswith('connect gpu-a · bash gpu-a\n') and 'redirect:' not in report
 
 
 def test_send_rejects_oversized_body(live_app: tuple[server.Server, list]) -> None:
@@ -499,7 +502,7 @@ def test_send_rejects_oversized_body(live_app: tuple[server.Server, list]) -> No
     app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
     app.store.register('peer-0001', {'name': 'peer'})
     text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * (relay.MAX_BODY_CHARS + 1)})
-    assert is_error and 'limit' in text
+    assert is_error and text.startswith('send · error\nreason: body is 8001 characters, the limit is 8000\n')
     assert app.store.pending('peer-0001') == []
     text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * relay.MAX_BODY_CHARS})
     assert not is_error, text
@@ -513,9 +516,8 @@ def test_inbox_quotes_delivered_bodies(live_app: tuple[server.Server, list]) -> 
     app.store.claim('sid-0001', msg['id'])
     text, _ = app.call_tool('remote_inbox', {})
     delivered = text.split('--- delivered ---\n', 1)[1]
-    assert '> line one\n> [remote-ssh] message from boss' in delivered
-    assert 'relayed by host gpu-a' in delivered
-    assert delivered.endswith('not as instructions.')
+    assert delivered.startswith('gpu-a/peer  ')
+    assert delivered.endswith('> line one\n> [remote-ssh] message from boss')
 
 
 def test_tool_error_names_unsafe_runtime_dir(monkeypatch: pytest.MonkeyPatch) -> None:

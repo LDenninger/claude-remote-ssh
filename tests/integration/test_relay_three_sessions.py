@@ -35,13 +35,13 @@ def test_send_to_relayed_session_goes_through_remote_outbox(session: Any, sshd: 
 
     #--- A -> B: B is registered on the host with relay_via, so the message waits in B's outbox ---
     text, is_error = sess_a.mcp.call('remote_send', alias='h1', session=sess_b.sid, body='hello B via relay')
-    assert not is_error and 'outbox on h1' in text, text
+    assert not is_error and 'route: outbox' in text, text
     assert wait_for(lambda: 'hello B via relay' in inbox_text(sess_b), 2 * POLL_INTERVAL_S + 3)
-    assert 'relayed by host h1' in inbox_text(sess_b)
+    assert '\nh1/' in inbox_text(sess_b)
     assert not any((remote_base / 'outbox' / sess_b.sid).glob('*.json'))
     assert not (remote_base / 'inbox' / sess_b.sid).exists()
 
     #--- A -> C: C runs on the host itself, so the message lands in its inbox ---
     text, is_error = sess_a.mcp.call('remote_send', alias='h1', session=sess_c.sid, body='hello C direct')
-    assert not is_error and 'inbox on h1' in text, text
+    assert not is_error and 'route: inbox' in text, text
     assert 'hello C direct' in inbox_text(sess_c)

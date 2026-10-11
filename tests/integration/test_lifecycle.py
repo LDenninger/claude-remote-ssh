@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import os
 import signal
 import sys
@@ -41,17 +42,17 @@ def test_i1_connect_exec_mount_disconnect(session: Any, sshd: dict, remote_dir: 
 
     connect_text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
     assert not is_error, connect_text
-    assert connect_text.startswith(f'connected h1 ({sshd["host"]}:{remote_dir})')
-    assert 'remote_mode("h1") sends every later Bash call there.' in connect_text
+    assert connect_text.startswith('connect h1 · ') and f'\npath: {remote_dir}\n' in connect_text
+    assert '\nredirect: remote_mode("h1")' in connect_text
     assert len(master_pids(sess.rt, 'h1')) == 1
 
     #--- remote_exec runs in the project path and passes the exit code through ---
     text, is_error = sess.mcp.call('remote_exec', alias='h1', command='pwd; echo out; echo err >&2; exit 3')
     assert not is_error
-    assert text.startswith('exit 3 on h1')
+    assert text.startswith('exec h1 · exit 3')
     assert f'{remote_dir}\nout' in text and 'err' in text
     text, is_error = sess.mcp.call('remote_exec', alias='h1', command='true')
-    assert not is_error and text.startswith('exit 0 on h1')
+    assert not is_error and text.startswith('exec h1 · exit 0')
 
     #--- the file mount shows remote files and writes through to them ---
     fs_dir = sess.rt / 'h1' / 'fs'
@@ -63,7 +64,7 @@ def test_i1_connect_exec_mount_disconnect(session: Any, sshd: dict, remote_dir: 
     assert (remote_dir / 'new.txt').read_text() == 'created\n'
 
     text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
-    assert not is_error and text.startswith('disconnected h1'), text
+    assert not is_error and text.startswith('disconnect h1'), text
     assert_released(sess.rt, 'h1')
     assert 'h1' not in state.read_json(sess.rt / 'state.json')['hosts']
     assert (remote_dir / 'hello.txt').read_text() == 'edited\n'
@@ -100,12 +101,12 @@ def test_i2_two_hosts_and_one_failure(session: Any, sshd: dict, remote_dir: Path
     results = {alias: Mcp.result(sess.mcp.wait(msg_id)) for alias, msg_id in ids.items()}
     assert not results['h1'][1], results['h1'][0]
     assert not results['h3'][1], results['h3'][0]
-    assert results['h2'][1] and results['h2'][0].startswith('remote_connect failed: h2'), results['h2'][0]
+    assert results['h2'][1] and results['h2'][0].startswith('connect h2 · error'), results['h2'][0]
     assert_released(sess.rt, 'h2')
 
     text, _ = sess.mcp.call('remote_status')
-    assert text.startswith('2 host(s) connected'), text
-    assert 'h1: connected' in text and 'h3: connected' in text and 'h2: failed' in text
+    assert text.startswith('status · 3 hosts'), text
+    assert all(re.search(rf'^{alias}\s+{word}\s', text, re.M) for alias, word in (('h1', 'connected'), ('h3', 'connected'), ('h2', 'failed'))), text
 
     for alias, path in (('h1', remote_dir), ('h3', other_dir)):
         text, is_error = sess.mcp.call('remote_exec', alias=alias, command='pwd')
@@ -147,7 +148,7 @@ def test_i3_master_killed_reconnects_and_remounts(session: Any, sshd: dict, remo
     def reconnected() -> bool:
         pids = master_pids(sess.rt, 'h1')
         status, _ = sess.mcp.call('remote_status')
-        return bool(pids) and old_pid not in pids and 'h1: connected' in status and 'master up' in status
+        return bool(pids) and old_pid not in pids and re.search(r'^h1\s+connected\s', status, re.M) is not None
 
     assert wait_for(reconnected, RECONNECT_LIMIT_S, interval=0.5), sess.mcp.call('remote_status')[0]
     print(f'\nI3: master back after {time.monotonic() - killed_at:.1f} s')
@@ -175,7 +176,7 @@ def test_remote_exec_timeout_leaves_no_remote_process(session: Any, sshd: dict, 
     marker = f'sleep 7{os.getpid() % 1000:03d}'
     started = time.monotonic()
     text, is_error = sess.mcp.call('remote_exec', alias='h1', command=f'{marker}; echo done', timeout_s=2)
-    assert is_error and text.startswith('exit 124 on h1'), text
+    assert is_error and text.startswith('exec h1 · exit 124'), text
     assert time.monotonic() - started < 15
     assert wait_for(lambda: not pids_matching(marker), 5), f'{marker} still runs on the remote'
 
@@ -214,7 +215,7 @@ def test_session_end_with_frozen_host_releases_everything_within_10s(session: An
             except ProcessLookupError:
                 pass
     text, _ = sess.mcp.call('remote_status')
-    assert text.startswith('no hosts connected'), text
+    assert text.startswith('status · 0 hosts'), text
 
 
 def test_i4_sigkill_of_parent_claude_tears_down_within_10s(sshd: dict, remote_dir: Path, tmp_path: Path) -> None:

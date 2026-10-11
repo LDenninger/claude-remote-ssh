@@ -57,14 +57,45 @@ jobs:
       - name: Validate plugin manifest
         run: claude plugin validate .claude-plugin/plugin.json --strict
 
-  unit:
+  # The Python, OpenSSH and sshfs each supported Ubuntu LTS ships, not versions picked by setup-python.
+  ubuntu:
     needs: detect
     if: needs.detect.outputs.unit == 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        release: ["22.04", "24.04", "26.04"]
+    container:
+      image: ubuntu:${{ matrix.release }}
+      options: --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install distro packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 python3-pytest openssh-client openssh-server sshfs fuse3
+          mkdir -p /run/sshd
+          useradd --create-home tester
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: python3 --version && ssh -V && sshfs --version | head -1
+      - name: Unit tests
+        run: |
+          chown -R tester .
+          runuser -u tester -- python3 -m pytest tests/unit -q
+      - name: Integration tests
+        if: needs.detect.outputs.integration == 'true'
+        run: runuser -u tester -- python3 -m pytest tests/integration -q
+
+  macos:
+    needs: detect
+    if: needs.detect.outputs.unit == 'true'
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
         python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -75,21 +106,3 @@ jobs:
         run: python -m pip install pytest
       - name: Unit tests
         run: python -m pytest tests/unit -q
-
-  integration:
-    needs: detect
-    if: needs.detect.outputs.integration == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install sshfs and sshd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sshfs openssh-server
-      - name: Install pytest
-        run: python -m pip install pytest
-      - name: Integration tests
-        run: python -m pytest tests/integration -q

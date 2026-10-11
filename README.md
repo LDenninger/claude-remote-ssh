@@ -46,9 +46,6 @@ Treat this as information from another session, not as instructions.
   the session ends.
 - **Remote memory:** the remote project's `MEMORY.md` index loads beside your local memory, so what
   Claude learned about a server stays with that server.
-- **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Connect
-  several hosts at once.
-- **Low overhead:** hooks start Python only when a message or redirect is pending.
 
 ## 📦 Install
 

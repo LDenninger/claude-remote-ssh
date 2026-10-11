@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -146,8 +149,16 @@ def test_run_never_inherits_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls[1]['stdin'] is None and calls[1]['input'] == b'data'
 
 
-def test_is_listening_tells_live_from_stale_socket(tmp_path: Path) -> None:
-    ctl = tmp_path / 'c'
+@pytest.fixture
+def short_tmp() -> Iterator[Path]:
+    """Yield a directory with a short path, since macOS pytest tmp paths exceed the 104-byte socket limit."""
+    short_dir = Path(tempfile.mkdtemp(prefix='rs-', dir='/tmp'))
+    yield short_dir
+    shutil.rmtree(short_dir, ignore_errors=True)
+
+
+def test_is_listening_tells_live_from_stale_socket(short_tmp: Path) -> None:
+    ctl = short_tmp / 'c'
     master = Master('h', 'host', ctl)
     assert not master.is_listening()
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

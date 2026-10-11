@@ -580,3 +580,14 @@ def test_shutdown_tears_down_then_exits(tmp_path: Path) -> None:
     app.shutdown()
     assert host.disconnects == 1
     assert exits == [True, True]
+
+
+def test_config_treats_unresolved_user_config_placeholders_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    #--- an option the user never set may arrive as its literal ${user_config.*} placeholder ---
+    monkeypatch.setenv('REMOTE_SSH_MESSAGING', '${user_config.messaging}')
+    monkeypatch.setenv('REMOTE_SSH_POLL_INTERVAL', '${user_config.poll_interval_s}')
+    monkeypatch.setenv('REMOTE_SSH_SSHFS_OPTIONS', '${user_config.sshfs_options}')
+    config = server.Config.from_env()
+    assert config.messaging is True
+    assert config.poll_interval_s == 2.0
+    assert config.sshfs_options == ''

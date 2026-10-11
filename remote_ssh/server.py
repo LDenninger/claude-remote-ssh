@@ -66,14 +66,18 @@ class Config:
     @classmethod
     def from_env(cls) -> Config:
         """Read the options from the environment, falling back to defaults on bad values."""
+        def option(name: str) -> str:
+            value = os.environ.get(name, '')
+            return '' if value.startswith('${') else value
+
         try:
-            poll_interval_s = min(max(float(os.environ.get('REMOTE_SSH_POLL_INTERVAL') or 2), 1.0), 60.0)
+            poll_interval_s = min(max(float(option('REMOTE_SSH_POLL_INTERVAL') or 2), 1.0), 60.0)
         except ValueError:
             poll_interval_s = 2.0
         return cls(
-            messaging=(os.environ.get('REMOTE_SSH_MESSAGING') or 'true').lower() not in ('false', '0'),
+            messaging=(option('REMOTE_SSH_MESSAGING') or 'true').lower() not in ('false', '0'),
             poll_interval_s=poll_interval_s,
-            sshfs_options=os.environ.get('REMOTE_SSH_SSHFS_OPTIONS', ''),
+            sshfs_options=option('REMOTE_SSH_SSHFS_OPTIONS'),
             ssh_opts=shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', '')),
         )
 

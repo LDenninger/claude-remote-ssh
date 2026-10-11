@@ -55,8 +55,9 @@ Local: OpenSSH 8.0+, Python 3.9+, and sshfs with FUSE for mounts and remote memo
 | Fedora | `sudo dnf install openssh-clients fuse-sshfs python3` |
 | macOS | install [macFUSE](https://macfuse.github.io/), then `brew install gromgit/fuse/sshfs-mac` |
 
-Remote: `bash` and an SSH server, plus this plugin for messaging. Tested on Ubuntu 22.04, 24.04 and
-26.04 (system Python 3.10, 3.12, 3.14) and macOS (Python 3.9, 3.12).
+Remote: `bash` and an SSH server, plus this plugin for messaging. Linux and macOS are supported,
+Windows is not. Unit and integration tests run on Ubuntu 22.04, 24.04 and 26.04 (system Python
+3.10, 3.12, 3.14). Unit tests run on macOS (Python 3.9, 3.12), and the integration tests do not.
 
 ## 🚀 Usage
 
@@ -96,10 +97,12 @@ Messages arrive with the next prompt or tool call, and through a monitor in inte
 
 ## ⚙️ Configuration
 
-Hosts to connect at session start go in `<project>/.claude/remote-ssh.local.json`, kept out of git:
+Hosts to connect at session start go in `~/.claude/remote-ssh/autoconnect.json`, keyed by the
+absolute project path. The file lives outside the repository, so a repository can never start a
+connection. `.claude/remote-ssh.json` and `.claude/remote-ssh.local.json` are ignored.
 
 ```json
-{ "hosts": [ { "alias": "gpu-a", "host": "gpu-a", "path": "~/proj", "autoconnect": true } ] }
+{ "projects": { "/home/me/proj": { "hosts": [ { "alias": "gpu-a", "host": "gpu-a", "path": "~/proj" } ] } } }
 ```
 
 Plugin options, set through `/config`:
@@ -109,7 +112,7 @@ Plugin options, set through `/config`:
 | `messaging` | `true` | register on connected hosts and relay messages |
 | `poll_interval_s` | `2` | health check and relay period in seconds |
 | `sshfs_options` | empty | extra `-o` options for every sshfs mount |
-| `redirect_confirm` | `true` | ask before each redirected `Bash` command |
+| `redirect_confirm` | `true` | ask before each redirected `Bash` command, see [Security](#-security) |
 
 ## 🔧 Troubleshooting
 
@@ -124,17 +127,49 @@ Plugin options, set through `/config`:
 
 - Credentials come only from `~/.ssh/config` and the SSH agent. The plugin never stores or asks for
   them.
-- `remote_exec` and redirected `Bash` calls go through Claude Code's permission prompts.
-- Only `.claude/remote-ssh.local.json` starts connections. A committed `.claude/remote-ssh.json` is
-  ignored.
-- Messages and remote memory are treated as data, never instructions. Redirect denies `Bash` calls
-  while its host is down instead of running them locally.
+- `remote_exec` is one MCP permission: choosing "don't ask again" approves every later remote
+  command. Redirected `Bash` calls go through the `Bash` permission flow.
+- Redirect applies your `Bash` deny rules to the original command and denies matches, and the
+  approval prompt shows the original command. Allow rules are not applied to the original. With
+  `redirect_confirm` off, whatever matches the rewritten `ssh ...` line approves the command, so do
+  not allow `Bash(ssh:*)` in that mode.
+- Redirect denies `Bash` calls while its host is down instead of running them locally.
+- Message headers from remote hosts are sanitized and quoted, bodies are capped at 8 000 characters,
+  and messages reach the model as quoted data that names the relaying host. This is a mitigation, not
+  a guarantee: any process running as your user on a connected host, including other Claude sessions,
+  can put text into your session's context. Turn it off with the `messaging` option.
+- Remote memory is read as data, with the same limit.
+
+### What it runs and stores
+
+- **Hooks:** `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PostToolUse` (every tool call) and
+  `PreToolUse` (every `Bash` call). They start Python only when work is pending.
+- **Background processes:** the MCP server for the session, one SSH ControlMaster per host, one ssh
+  round trip per host every `poll_interval_s`, and a monitor in interactive sessions.
+- **Local files:** `$XDG_RUNTIME_DIR/remote-ssh/` (`$TMPDIR/rssh` on macOS, `/tmp/remote-ssh-<uid>`
+  as fallback) holds state, `server.log`, sockets and mountpoints. `~/.claude/remote-ssh/` holds
+  `machine-id`, `sessions/`, `inbox/`, `outbox/` and `autoconnect.json`.
+- **On each connected host:** `~/.claude/remote-ssh/sessions/<sid>.json` with the local hostname, working
+  directory, Claude pid, session id, session name and machine id, plus messages in `inbox/` and
+  `outbox/`.
+- **Remote memory:** read from and written to the remote `~/.claude/projects/<slug>/memory`.
+- **Commands:** every command runs in `bash -lc` on the remote host.
+- **Retention:** local inbox and outbox entries are swept after 7 days, and `read/` keeps 200
+  messages. Uninstalling the plugin removes neither directory:
+
+```bash
+rm -rf ~/.claude/remote-ssh                  # local
+ssh <host> 'rm -rf ~/.claude/remote-ssh'     # each host
+```
+
+Nothing is sent anywhere except the hosts you connect. See [SECURITY.md](SECURITY.md) and
+[PRIVACY.md](PRIVACY.md).
 
 ## 🤝 Contributing
 
 Questions and bug reports go to [GitHub issues](https://github.com/LDenninger/claude-remote-ssh/issues),
 and pull requests are welcome. CI validates the plugin and runs the tests on Ubuntu 22.04, 24.04 and
-26.04 and on macOS. See [CONTRIBUTING.md](CONTRIBUTING.md).
+26.04 and unit tests on macOS. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Testing
 

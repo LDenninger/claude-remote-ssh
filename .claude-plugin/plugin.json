@@ -4,12 +4,22 @@
   "description": "Message between Claude Code sessions on different machines, and run commands, edit files and use project memory on remote hosts over SSH.",
   "author": {
     "name": "Luis Denninger",
+    "email": "luis.denninger@gmail.com",
     "url": "https://github.com/LDenninger"
   },
   "homepage": "https://github.com/LDenninger/claude-remote-ssh",
   "repository": "https://github.com/LDenninger/claude-remote-ssh",
   "license": "MIT",
-  "keywords": ["ssh", "remote", "sshfs", "mount", "memory", "messaging", "hpc", "gpu"],
+  "keywords": [
+    "ssh",
+    "remote",
+    "sshfs",
+    "mount",
+    "memory",
+    "messaging",
+    "hpc",
+    "gpu"
+  ],
   "userConfig": {
     "messaging": {
       "type": "boolean",
@@ -34,8 +44,10 @@
     "redirect_confirm": {
       "type": "boolean",
       "title": "Confirm redirected Bash",
-      "description": "Ask for approval of the rewritten ssh command line on every Bash call redirected to a remote host.",
+      "description": "Ask for approval of the rewritten ssh command line on every Bash call redirected to a remote host. When off, a Bash allow rule that matches the rewritten ssh command approves the redirected command, so do not allow Bash(ssh:*).",
       "default": true
     }
-  }
+  },
+  "privacyPolicyUrl": "https://github.com/LDenninger/claude-remote-ssh/blob/master/PRIVACY.md",
+  "supportUrl": "https://github.com/LDenninger/claude-remote-ssh/issues"
 }

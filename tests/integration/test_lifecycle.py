@@ -24,7 +24,8 @@ def assert_released(rt: Path, alias: str) -> None:
     assert not mount.is_mounted(host_dir / 'fs')
     assert not mount.is_mounted(host_dir / 'mem')
     assert not (host_dir / 'c').exists()
-    assert pids_matching(str(host_dir / 'c')) == []
+    #--- sshfs exits a moment after its lazy unmount, so give it a few seconds ---
+    assert wait_for(lambda: pids_matching(str(host_dir / 'c')) == [], timeout=5), pids_matching(str(host_dir / 'c'))
 
 
 def master_pids(rt: Path, alias: str) -> list[int]:

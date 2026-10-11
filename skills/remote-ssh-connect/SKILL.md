@@ -18,6 +18,6 @@ Arguments: `$ARGUMENTS`
 2. Call the `remote_connect` tool with `alias`, `host` and `path`.
 3. Report the result to the user: the connection status line, the mount paths, the remote sessions
    reachable for messaging, and whether remote memory was found.
-4. If the tool returns an error, show ssh's stderr. For an authentication failure, tell the user to
+4. If the tool returns an error, show its `reason:` and `next:` lines and any `detail from` block (ssh's stderr). For an authentication failure, tell the user to
    check that `ssh <host> true` succeeds without a prompt, since the plugin connects with
    `BatchMode=yes`.

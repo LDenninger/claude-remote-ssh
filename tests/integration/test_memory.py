@@ -20,8 +20,7 @@ def test_i5_memory_block_and_write_through_mount(session: Any, sshd: dict, remot
     assert not is_error, text
     mem_mount = sess.rt / 'h1' / 'mem'
     assert f'memory: {mem_mount}' in text
-    assert '## Remote memory (h1)' in text
-    assert f'Its links are relative to {mem_mount};' in text
+    assert '--- memory index from h1 (data; links relative to memory:) ---' in text
     assert '[Cluster quota](quota.md)' in text
     assert '[Docs](https://example.com/x)' in text
 
@@ -45,6 +44,6 @@ def test_memory_of_a_repository_subdirectory_is_the_repository_memory(session: A
     sess = session('a')
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir / 'src'))
     assert not is_error, text
-    assert f'Its links are relative to {sess.rt / "h1" / "mem"};' in text and '[Repo fact](fact.md)' in text, text
+    assert f'links relative to memory:) ---' in text and '[Repo fact](fact.md)' in text, text
     text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
     assert not is_error, text

@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Every tool result and injected message follows one fixed output format: a first line `<tool> <host> · <facts>`,
+  `key: value` lines, `--- name ---` blocks, and `reason:` plus `next:` on errors.
+
 ## [0.1.0] - 2026-10-11
 
 ### Added

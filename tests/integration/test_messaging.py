@@ -8,6 +8,7 @@ to A, and A's lifecycle loop pulls that outbox, all on the production code paths
 
 from __future__ import annotations
 
+import re
 import os
 import signal
 import time
@@ -46,30 +47,30 @@ def test_i7_round_trip_including_after_reconnect(session: Any, sshd: dict, remot
 
     text, is_error = sess_a.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
     assert not is_error, text
-    assert f'({sess_b.sid[:8]})' in text, text
+    assert text.startswith('connect h1 · 1 session · ') and '\nsessions: ' in text, text
     assert (remote_base / 'sessions' / f'{sess_a.sid}.json').exists()
 
     #--- A -> B lands directly in B's inbox on the remote ---
     text, is_error = sess_a.mcp.call('remote_send', alias='h1', session=sess_b.sid, body='ping from A')
-    assert not is_error and 'inbox on h1' in text, text
+    assert not is_error and 'route: inbox' in text, text
     assert 'ping from A' in inbox_text(sess_b)
 
     #--- B -> A goes to B's outbox and A's loop pulls it within two poll intervals ---
     text, is_error = sess_b.mcp.call('remote_send', session=sess_a.sid, body='pong from B')
-    assert not is_error and 'via outbox' in text, text
+    assert not is_error and 'route: outbox' in text, text
     delay = assert_arrives(sess_a, 'pong from B', 2 * POLL_INTERVAL_S)
     print(f'\nI7: outbox pull took {delay:.2f} s')
-    assert 'relayed by host h1' in inbox_text(sess_a)
+    assert '\nh1/' in inbox_text(sess_a)
 
     #--- a reply written while A's master is down is pulled once it is back ---
     [master_pid] = pids_matching(f'-M -N -S {sess_a.rt / "h1" / "c"}')
     os.kill(master_pid, signal.SIGKILL)
     text, is_error = sess_b.mcp.call('remote_send', session=sess_a.sid, body='sent during outage')
-    assert not is_error and 'via outbox' in text, text
+    assert not is_error and 'route: outbox' in text, text
 
     def reconnected() -> bool:
         pids = pids_matching(f'-M -N -S {sess_a.rt / "h1" / "c"}')
-        return bool(pids) and master_pid not in pids and 'h1: connected' in sess_a.mcp.call('remote_status')[0]
+        return bool(pids) and master_pid not in pids and re.search(r'^h1\s+connected\s', sess_a.mcp.call('remote_status')[0], re.M) is not None
 
     assert wait_for(reconnected, RECONNECT_LIMIT_S, interval=0.2)
     delay = assert_arrives(sess_a, 'sent during outage', 2 * POLL_INTERVAL_S)
@@ -97,4 +98,4 @@ def test_clear_moves_registration_to_new_session_id(session: Any, sshd: dict, re
     assert wait_for(moved, 2 * POLL_INTERVAL_S + 1), (list(local_sessions.iterdir()), list(remote_sessions.iterdir()))
     assert sess.mcp.proc.poll() is None
     text, _ = sess.mcp.call('remote_status')
-    assert 'h1: connected' in text and f'session {new_sid}' in text
+    assert re.search(r'^h1\s+connected\s', text, re.M) and f'session: {new_sid}' in text

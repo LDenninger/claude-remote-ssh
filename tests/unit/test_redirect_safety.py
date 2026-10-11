@@ -133,10 +133,10 @@ def test_local_prefix_skips_the_redirect_and_keeps_the_command(runtime: state.Ru
 
 
 def test_approval_prompt_shows_original_command_truncated(runtime: state.Runtime, tmp_path: Path) -> None:
-    assert pre_tool_use('ls -la', tmp_path)['permissionDecisionReason'] == 'remote-ssh: runs on gpu-a: ls -la'
+    assert pre_tool_use('ls -la', tmp_path)['permissionDecisionReason'] == 'redirect gpu-a · runs on gpu-a\ncommand: ls -la'
     long_reason = pre_tool_use('echo ' + 'x' * 1000, tmp_path)['permissionDecisionReason']
-    assert long_reason.startswith('remote-ssh: runs on gpu-a: echo xxx')
-    assert len(long_reason) <= 335
+    assert long_reason.startswith('redirect gpu-a · runs on gpu-a\ncommand: echo xxx')
+    assert len(long_reason) <= 350
 
 
 #---------------------------------------------------------------------
@@ -245,7 +245,7 @@ def test_remote_exec_rejects_bad_timeout(app_with_host: server.Server, bad: Any)
 def test_remote_exec_accepts_good_timeout(app_with_host: server.Server, good: Any) -> None:
     app_with_host.stub.outputs = [('', '', 0)]
     args = {'alias': 'gpu-a', 'command': 'x', **({} if good is None else {'timeout_s': good})}
-    assert app_with_host.call_tool('remote_exec', args) == ('exit 0 on gpu-a', False)
+    assert app_with_host.call_tool('remote_exec', args) == ('exec gpu-a · exit 0', False)
 
 
 @pytest.mark.parametrize('code, is_error', [(0, False), (1, False), (2, False), (123, False), (124, True), (137, True), (255, True)])
@@ -253,4 +253,4 @@ def test_remote_exec_error_flag_only_for_timeout_signal_or_ssh_failure(app_with_
     app_with_host.stub.outputs = [('found\n', '', code)]
     text, flag = app_with_host.call_tool('remote_exec', {'alias': 'gpu-a', 'command': 'grep x f'})
     assert flag is is_error
-    assert text.startswith(f'exit {code} on gpu-a') and 'found' in text
+    assert text.startswith('exec gpu-a · error' if code == 255 else f'exec gpu-a · exit {code}') and 'found' in text

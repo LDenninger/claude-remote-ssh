@@ -1,7 +1,7 @@
 {
   "name": "remote-ssh",
   "version": "0.1.0",
-  "description": "Connect a Claude Code session to remote machines over SSH: persistent connections, sshfs mounts, remote project memory and messaging with remote sessions.",
+  "description": "Message between Claude Code sessions on different machines, and run commands, edit files and use project memory on remote hosts over SSH.",
   "author": {
     "name": "Luis Denninger",
     "url": "https://github.com/LDenninger"

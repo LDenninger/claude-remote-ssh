@@ -4,14 +4,20 @@
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-A Claude Code plugin that connects one session to remote machines over SSH for the session's lifetime.
+Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.
 
-Connect a host by alias, and the session runs commands on it, edits its project files through an
-sshfs mount, reads and writes its project memory, and exchanges messages with Claude Code sessions
-running there. Every connection, mount and registration ends with the session.
+A session on your laptop and the sessions on your servers find each other, send messages and read
+the replies, so one session can hand work to another, ask a training run's session for its status,
+or collect results from several machines. The same connection runs commands on the remote host,
+mounts its project files for editing and loads its project memory. Every connection, mount and
+registration ends with the session.
 
 ## ✨ Features
 
+- **Messaging between machines:** sessions on different machines list each other, send messages and
+  receive replies in the conversation. Interactive sessions get new messages from a monitor, and
+  every session gets them with its next prompt or tool call. Every transfer runs over the local
+  session's SSH connection, so a server never needs to reach your laptop.
 - **Persistent connections:** one SSH ControlMaster per host, health-checked and reconnected with
   backoff. Several hosts connect at once, and a failing host never blocks another.
 - **Remote commands:** `remote_exec` runs one command on a host. Redirect mode sends every `Bash`
@@ -20,9 +26,6 @@ running there. Every connection, mount and registration ends with the session.
   work on remote files.
 - **Remote memory:** the remote project's `MEMORY.md` index is loaded into the session, together with
   the local mount of the remote memory directory its links are relative to.
-- **Messaging:** sessions on different machines send each other messages through the plugin's own
-  inbox. Every transfer runs over the local session's connection, so the remote host never connects
-  back.
 - **Autoconnect:** hosts listed in your personal `.claude/remote-ssh.local.json` connect in the
   background at session start. Their mount paths and memory index reach the session with the next
   prompt or tool call.
@@ -128,6 +131,14 @@ Install the plugin on both machines. Connecting to a host registers the local se
 `remote_sessions(alias)` lists the sessions a message can reach. A remote session replies with
 `remote_send` and no alias, and the local session pulls the reply over its connection every
 `poll_interval_s` seconds.
+
+```text
+you        Ask the session on gpu-a whether the training run finished.
+laptop     remote_sessions("gpu-a")          -> train-3f2a  ~/proj  busy
+           remote_send("gpu-a", "train-3f2a", "Did the run finish? Report the final val loss.")
+gpu-a      [remote-ssh] message from laptop/proj-91c0 ... -> checks the log, replies with remote_send
+laptop     [remote-ssh] message from gpu-a/train-3f2a: Finished at epoch 40, val loss 0.212.
+```
 
 A message reaches an idle recipient through the plugin's monitor within about two poll intervals.
 Monitors run only in interactive sessions, so a session without one sees the message at its next

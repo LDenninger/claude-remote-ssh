@@ -1,7 +1,7 @@
 <h1>
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="480">
+    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="500">
   </picture>
 </h1>
 
@@ -14,21 +14,34 @@
 
 <p>Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.</p>
 
-Sessions on your laptop and your servers find each other and exchange messages, so one session can
-hand work to another or ask a training run's session for its status. The same SSH connection runs
-commands, mounts the remote project and loads its memory, and all of it ends with the session.
+Your laptop session sees only your laptop, and the session beside your training run sees only the
+GPU server. remote-ssh links them over your existing SSH setup, so one session can ask another for
+its status, hand it a task, or collect results from several servers. The same connection runs
+commands, edits files and loads project memory on each host, and all of it closes with the session.
+
+```text
+# laptop: you type
+Ask the training session on gpu whether the run finished.
+
+# laptop: Claude finds that session and sends the question
+remote_send("gpu", "run-3f2a", "Did the run finish? Report the final val loss.")
+
+# laptop: the reply from gpu lands in your conversation
+[remote-ssh] message from run-3f2a (3f2a91c0) relayed by host gpu at 2026-10-11T09:14:02+00:00:
+> Finished at epoch 40, val loss 0.212.
+```
 
 ## ✨ Features
 
-- **Messaging between machines:** sessions list each other, send messages and get replies in the
-  conversation. All traffic runs over the local session's SSH connection, so servers never connect
-  back.
-- **Remote commands:** `remote_exec` runs one command. Redirect mode sends every `Bash` call to a host,
-  and `local:` keeps a command local.
-- **Remote memory:** the remote project's `MEMORY.md` index is loaded beside your local memory.
-- **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Several hosts
-  connect at once.
-- **Project mounts:** the remote project is mounted with sshfs, so Read, Edit and Write work on it.
+- **Messaging between machines:** your session lists the Claude sessions on every connected host,
+  sends them questions or tasks and gets their replies in the conversation. Traffic runs over your
+  SSH connection, so servers never connect back. Both machines need the plugin.
+- **Remote commands:** `remote_exec` runs one command on a host. Redirect mode sends every `Bash`
+  call there, and a `local:` prefix keeps a single command on your machine.
+- **Remote memory:** the remote project's `MEMORY.md` index loads beside your local memory.
+- **Project mounts:** sshfs mounts the remote project, so Read, Edit and Write work on remote files.
+- **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Connect
+  several hosts at once.
 - **Low overhead:** hooks start Python only when a message or redirect is pending.
 
 ## 📦 Install
@@ -56,8 +69,8 @@ Local: OpenSSH 8.0+, Python 3.9+, and sshfs with FUSE for mounts and remote memo
 | macOS | install [macFUSE](https://macfuse.github.io/), then `brew install gromgit/fuse/sshfs-mac` |
 
 Remote: `bash` and an SSH server, plus this plugin for messaging. Linux and macOS are supported,
-Windows is not. Unit and integration tests run on Ubuntu 22.04, 24.04 and 26.04 (system Python
-3.10, 3.12, 3.14). Unit tests run on macOS (Python 3.9, 3.12), and the integration tests do not.
+Windows is not. Unit and integration tests run on Ubuntu 22.04, 24.04 and 26.04 (Python 3.10, 3.12,
+3.14), and macOS runs the unit tests only (Python 3.9, 3.12).
 
 ## 🚀 Usage
 
@@ -68,7 +81,17 @@ Windows is not. Unit and integration tests run on Ubuntu 22.04, 24.04 and 26.04 
 ```
 
 Arguments are `<alias> [host] [path]`, with `host` defaulting to the alias and `path` to the local
-project path. After connecting, ask Claude in plain language to run, edit or message on a host.
+project path. Then ask in plain language:
+
+```text
+Ask the session on gpu-a to rerun the eval on the new checkpoint and report the score.
+Collect the final val loss from the training sessions on gpu-a and gpu-b into a table.
+Run nvidia-smi on gpu-b.
+Send Bash to gpu-a and run the tests there.
+```
+
+A message reaches the other session through a monitor in interactive sessions, otherwise with that
+session's next prompt or tool call.
 
 ### Tools
 
@@ -83,18 +106,6 @@ project path. After connecting, ask Claude in plain language to run, edit or mes
 | `remote_send` | alias?, session, body | message id |
 | `remote_inbox` | none | received messages |
 
-### Messaging
-
-```text
-you        Ask the session on gpu-a whether the training run finished.
-laptop     remote_sessions("gpu-a")          -> train-3f2a  ~/proj  busy
-           remote_send("gpu-a", "train-3f2a", "Did the run finish? Report the final val loss.")
-gpu-a      [remote-ssh] message from laptop/proj-91c0 ... -> checks the log, replies with remote_send
-laptop     [remote-ssh] message from gpu-a/train-3f2a: Finished at epoch 40, val loss 0.212.
-```
-
-Messages arrive with the next prompt or tool call, and through a monitor in interactive sessions.
-
 ## ⚙️ Configuration
 
 Hosts to connect at session start go in `~/.claude/remote-ssh/autoconnect.json`, keyed by the
@@ -102,7 +113,8 @@ absolute project path. The file lives outside the repository, so a repository ca
 connection. `.claude/remote-ssh.json` and `.claude/remote-ssh.local.json` are ignored.
 
 ```json
-{ "projects": { "/home/me/proj": { "hosts": [ { "alias": "gpu-a", "host": "gpu-a", "path": "~/proj" } ] } } }
+{ "projects": { "/home/me/proj": {
+    "hosts": [ { "alias": "gpu-a", "host": "gpu-a", "path": "~/proj" } ] } } }
 ```
 
 Plugin options, set through `/config`:

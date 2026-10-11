@@ -1,9 +1,10 @@
 """Runtime directory and JSON state files shared by the plugin processes of one session.
 
 Each Claude Code process gets a private runtime directory `runtime_base()/<key>`, keyed by
-`ClaudeProc.key`. `Runtime` owns the paths inside it (owner.json, state.json, per-host control
-sockets and mountpoints) and serialises read-modify-write updates with `fcntl.flock`. Both base
-directories are read from the environment at call time, so tests can redirect them after import.
+`ClaudeProc.key`. `Runtime` owns the paths inside it (owner.json, state.json, the redirect flag,
+queued context blocks, per-host control sockets and mountpoints) and serialises read-modify-write
+updates with `fcntl.flock`. Both base directories are read from the environment at call time, so
+tests can redirect them after import.
 """
 
 from __future__ import annotations
@@ -101,10 +102,15 @@ def ensure_private_dir(path: Path) -> Path:
 
 def write_json_atomic(path: Path, obj: Any) -> None:
     """Write `obj` as JSON to `path` with mode 0600, so readers see the old or the new file only."""
+    write_text_atomic(path, json.dumps(obj, indent=2))
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write `text` to `path` with mode 0600, so readers see the old or the new file only."""
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
     try:
-        with os.fdopen(fd, 'w') as tmp_file:
-            json.dump(obj, tmp_file, indent=2)
+        with os.fdopen(fd, 'w', encoding='utf-8') as tmp_file:
+            tmp_file.write(text)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
         os.replace(tmp_name, path)
@@ -189,6 +195,19 @@ class Runtime:
         """Path of the lock file that serialises owner.json and state.json updates."""
         return self.dir / 'state.lock'
 
+    @property
+    def redirect_flag_path(self) -> Path:
+        """Path of the file that exists while state.json names a redirect target.
+
+        The PreToolUse hook command tests for it in shell and starts Python only when it exists.
+        """
+        return self.dir / 'redirect-on'
+
+    @property
+    def context_dir(self) -> Path:
+        """Directory of queued context blocks, one `<alias>.md` per host, created if missing."""
+        return ensure_private_dir(self.dir / 'context')
+
     #--- per-host paths ---
 
     def host_dir(self, alias: str) -> Path:
@@ -245,4 +264,41 @@ class Runtime:
             state = self.load_state()
             fn(state)
             write_json_atomic(self.state_path, state)
+            if state.get('redirect'):
+                self.redirect_flag_path.touch()
+            else:
+                self.redirect_flag_path.unlink(missing_ok=True)
         return state
+
+    #--- queued context, handed to the session by the next UserPromptSubmit or PostToolUse hook ---
+
+    def queue_context(self, alias: str, text: str) -> None:
+        """Queue one host's context block, replacing an unclaimed older block of that host."""
+        write_text_atomic(self.context_dir / f'{validate_alias(alias)}.md', text)
+
+    def drop_context(self, alias: str) -> None:
+        """Remove an unclaimed context block of a host, if any."""
+        (self.dir / 'context' / f'{validate_alias(alias)}.md').unlink(missing_ok=True)
+
+    def claim_context(self) -> list[str]:
+        """Take every queued context block, sorted by alias.
+
+        Each block is renamed before it is read, so among concurrent claimers exactly one
+        gets it.
+
+        Returns:
+            The block texts, empty when nothing is queued.
+        """
+        queue_dir = self.dir / 'context'
+        if not queue_dir.is_dir():
+            return []
+        blocks = []
+        for block_path in sorted(queue_dir.glob('*.md')):
+            claimed_path = queue_dir / f'.{block_path.name}.{os.getpid()}.claimed'
+            try:
+                os.rename(block_path, claimed_path)
+            except FileNotFoundError:
+                continue
+            blocks.append(claimed_path.read_text(encoding='utf-8', errors='replace'))
+            claimed_path.unlink()
+        return blocks

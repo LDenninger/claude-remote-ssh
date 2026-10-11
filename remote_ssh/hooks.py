@@ -3,23 +3,17 @@
 Every hook event runs `main(event)`, which reads the event's JSON from stdin, dispatches
 it through `dispatch` and prints the hook output JSON, or nothing. Hooks never talk to the
 MCP server directly: they read and write the runtime directory (`owner.json`,
-`state.json`, `autoconnect.json`, `shutdown`) and the local message store. Every failure
-fails open, logged to stderr, with exit code 0.
+`state.json`, `autoconnect.json`, `shutdown`, `context/`) and the local message store.
+Every failure fails open, logged to stderr, with exit code 0. Each handler imports only
+the modules it needs, since hooks run on every prompt and tool call.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
-import socket
 import sys
-import time
-from pathlib import Path
 from typing import Any
-
-from remote_ssh import inbox, memory, platform, relay, state
-from remote_ssh.conn import exec_argv
 
 SHUTDOWN_WAIT_S = 10.0
 SHUTDOWN_POLL_S = 0.2
@@ -80,6 +74,11 @@ def is_pid_alive(pid: Any) -> bool:
 
 def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Record the session identity, hand autoconnect hosts to the server, inject memory."""
+    import socket
+    from pathlib import Path
+
+    from remote_ssh import memory, platform, relay, state
+
     runtime = state.Runtime.current()
     if runtime is None:
         return None
@@ -116,7 +115,7 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
             blocks.append(memory.render_block(alias, index_md, mem_dir if index_md is not None else None))
     if autoconnect:
         aliases = ', '.join(entry['alias'] for entry in autoconnect)
-        blocks.append(f'remote-ssh: connecting {aliases} in the background; remote memory arrives in the remote_connect results / remote_status')
+        blocks.append(f'remote-ssh: connecting {aliases} in the background. Mounts and remote memory arrive with the next prompt or tool call.')
     return build_output('SessionStart', '\n\n'.join(blocks), platform.missing_message(platform.missing(platform.detect())))
 
 
@@ -128,6 +127,10 @@ def on_session_end(payload: dict[str, Any]) -> dict[str, Any] | None:
     """
     if payload.get('reason') == 'clear':
         return None
+    import time
+
+    from remote_ssh import state
+
     runtime = state.Runtime.current()
     if runtime is None:
         return None
@@ -145,6 +148,11 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Rewrite a Bash call into an ssh call on the redirect target, if one is connected."""
     if payload.get('tool_name') != 'Bash':
         return None
+    import shlex
+
+    from remote_ssh import state
+    from remote_ssh.conn import exec_argv
+
     runtime = state.Runtime.current()
     if runtime is None:
         return None
@@ -172,12 +180,16 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | None:
-    """Inject undelivered messages for this session (UserPromptSubmit, PostToolUse)."""
+    """Inject queued host context blocks and undelivered messages (UserPromptSubmit, PostToolUse)."""
+    from remote_ssh import inbox, relay, state
+
+    runtime = state.Runtime.current()
+    blocks = runtime.claim_context() if runtime is not None else []
     session_id = payload.get('session_id')
-    if not session_id:
-        return None
-    msgs = inbox.claim_pending(relay.Store(), session_id)
-    return build_output(event, inbox.format_batch(msgs)) if msgs else None
+    msgs = inbox.claim_pending(relay.Store(), session_id) if session_id else []
+    if msgs:
+        blocks.append(inbox.format_batch(msgs))
+    return build_output(event, '\n\n'.join(blocks)) if blocks else None
 
 
 #---------------------------------------------------------------------

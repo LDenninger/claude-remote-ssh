@@ -9,6 +9,7 @@ login shell runs it unchanged.
 from __future__ import annotations
 
 import shlex
+import socket
 import subprocess
 import tempfile
 import time
@@ -140,6 +141,20 @@ class Master:
         except (OSError, subprocess.TimeoutExpired):
             return False
         return result.returncode == 0
+
+    def is_listening(self) -> bool:
+        """Return whether a process accepts connections on the control socket.
+
+        A local connect only, without starting ssh. A master killed without cleanup leaves
+        its socket file behind, which then refuses connections.
+        """
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            try:
+                sock.connect(str(self.ctl))
+            except OSError:
+                return False
+        return True
 
     def stop(self) -> None:
         """Close the master, kill its process if needed and remove the socket. Never raises."""

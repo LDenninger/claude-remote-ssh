@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 import pytest
 
-from remote_ssh import ident, mount
+from remote_ssh import ident, memory, mount
 
 ROOT = Path(__file__).resolve().parents[2]
 SSHD = shutil.which('sshd') or '/usr/sbin/sshd'
@@ -280,3 +280,18 @@ def remote_dir(tmp_path: Path) -> Path:
     path = (tmp_path / 'remote-proj').resolve()
     path.mkdir()
     return path
+
+
+@pytest.fixture
+def remote_memory_dir(remote_dir: Path) -> Any:
+    """Create the remote memory directory of `remote_dir` under the real HOME, removed afterwards.
+
+    The slug derives from the unique `tmp_path`, so the project directory is new and only it
+    is ever removed.
+    """
+    mem_dir = Path(memory.remote_memory_dir(str(Path.home()), str(remote_dir)))
+    project_dir = mem_dir.parent
+    assert not project_dir.exists(), f'{project_dir} already exists'
+    mem_dir.mkdir(parents=True)
+    yield mem_dir
+    shutil.rmtree(project_dir)

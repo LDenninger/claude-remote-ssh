@@ -24,7 +24,10 @@ running there. Every connection, mount and registration ends with the session.
   inbox. Every transfer runs over the local session's connection, so the remote host never connects
   back.
 - **Autoconnect:** hosts listed in `.claude/remote-ssh.json` connect in the background at session
-  start.
+  start. Their mount paths and memory index reach the session with the next prompt or tool call.
+- **Low overhead:** the hooks on every prompt, tool call and `Bash` call are a shell file test, and
+  start Python only while a message, a queued host report or a redirect target waits. Each poll
+  runs one ssh process per host.
 
 ## 🔒 Security
 

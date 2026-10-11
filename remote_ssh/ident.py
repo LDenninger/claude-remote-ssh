@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +51,8 @@ def _read_stat_fields(pid: int) -> list[str] | None:
 
 def _ps(pid: int, fmt: str) -> str | None:
     """Return the stripped `ps -o <fmt> -p <pid>` output, or None if the process is gone."""
+    import subprocess  # macOS only: Linux hooks read /proc and skip this import
+
     try:
         result = subprocess.run(['ps', '-o', fmt, '-p', str(pid)], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):

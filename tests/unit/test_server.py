@@ -7,7 +7,9 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -215,6 +217,127 @@ def test_startup_saves_ssh_opts_for_hooks(live_app: tuple[server.Server, list]) 
     app.run_startup()
     assert app.runtime.load_state()['ssh_opts'] == ['-p', '2222']
     assert [entry['session_id'] for entry in app.store.sessions()] == ['sid-0001']
+
+
+def wait_until(predicate: Any, timeout: float = 5.0) -> bool:
+    """Poll `predicate` every 10 ms until it is truthy or `timeout` seconds pass."""
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return bool(predicate())
+
+
+def test_background_connect_queues_report_and_tool_connect_does_not(live_app: tuple[server.Server, list], monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = live_app
+    reports = {'gpu-a': ('connected gpu-a (h:/p)\n\n## Remote memory (gpu-a)', False), 'gpu-b': ('remote_connect failed: gpu-b', True),
+               'gpu-c': ('connected gpu-c (h:/p)', False)}
+    monkeypatch.setattr(app, 'connect_host', lambda alias, host, path: reports[alias])
+    app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
+    state.write_json_atomic(app.runtime.dir / 'autoconnect.json', [{'alias': 'gpu-a', 'host': 'h'}, {'alias': 'gpu-b', 'host': 'h'}])
+    app.run_startup()
+    assert wait_until(lambda: (app.runtime.context_dir / 'gpu-a.md').exists())
+    text, is_error = app.call_tool('remote_connect', {'alias': 'gpu-c', 'host': 'h', 'path': '/p'})
+    assert not is_error and text.startswith('connected gpu-c')
+    time.sleep(0.2)
+    [block] = app.runtime.claim_context()
+    assert block.startswith('remote-ssh: background connect\nconnected gpu-a')
+    assert '## Remote memory (gpu-a)' in block
+
+
+class TickHost:
+    """Host session stand-in for `tick`: a master probe, `-O check` and reconnect counters."""
+
+    def __init__(self, listening: bool = True, healthy: bool = True) -> None:
+        self.alias, self.host, self.status, self.error = 'gpu-a', 'h', 'connected', None
+        self.lock = threading.Lock()
+        self.retry_at, self.retry_delay = 0.0, 1.0
+        self.master = SimpleNamespace(alias='gpu-a', is_listening=lambda: listening)
+        self.healthy = healthy
+        self.checks = self.reconnects = 0
+
+    def is_healthy(self) -> bool:
+        self.checks += 1
+        return self.healthy
+
+    def reconnect(self) -> None:
+        self.reconnects += 1
+
+    def to_state(self) -> dict[str, Any]:
+        return {'host': self.host, 'status': self.status}
+
+
+@pytest.fixture
+def tick_app(live_app: tuple[server.Server, list], monkeypatch: pytest.MonkeyPatch) -> tuple[server.Server, list[Any]]:
+    """Return a live server whose outbox pulls are recorded, and the list that records them.
+
+    Appending an exception to the list makes the next pull raise it instead.
+    """
+    app, _ = live_app
+    app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
+    pulls: list[Any] = []
+
+    def pull_outbox(master: Any, sid: str, store: Any) -> int:
+        if pulls and isinstance(pulls[-1], Exception):
+            raise pulls.pop()
+        pulls.append(sid)
+        return 0
+
+    monkeypatch.setattr(server.relay, 'pull_outbox', pull_outbox)
+    return app, pulls
+
+
+def test_tick_with_messaging_pulls_once_without_check(tick_app: tuple[server.Server, list]) -> None:
+    app, pulls = tick_app
+    host = TickHost()
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert pulls == ['sid-0001']
+    assert (host.checks, host.status) == (0, 'connected')
+    assert not host.lock.locked()
+
+
+@pytest.mark.parametrize('listening, error', [(False, None), (True, server.relay.RemoteCommandError(255, 'mux failed'))])
+def test_tick_with_messaging_detects_dead_master(tick_app: tuple[server.Server, list], listening: bool, error: Exception | None) -> None:
+    app, pulls = tick_app
+    if error is not None:
+        pulls.append(error)
+    host = TickHost(listening=listening)
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert wait_until(lambda: host.reconnects == 1 and not host.lock.locked())
+    assert host.checks == 0
+    assert pulls == []
+    assert app.runtime.load_state()['hosts']['gpu-a']['status'] == 'reconnecting'
+
+
+def test_tick_keeps_host_on_remote_command_failure(tick_app: tuple[server.Server, list]) -> None:
+    app, pulls = tick_app
+    pulls.append(server.relay.RemoteCommandError(1, 'disk full'))
+    host = TickHost()
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert (host.status, host.reconnects, host.checks) == ('connected', 0, 0)
+
+
+@pytest.mark.parametrize('healthy', [True, False])
+def test_tick_without_messaging_uses_check_only(tick_app: tuple[server.Server, list], healthy: bool) -> None:
+    app, pulls = tick_app
+    app.config.messaging = False
+    host = TickHost(healthy=healthy)
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert pulls == []
+    assert host.checks == 1
+    assert wait_until(lambda: host.reconnects == (0 if healthy else 1) and not host.lock.locked())
+
+
+def test_teardown_removes_redirect_flag_and_keeps_target(live_app: tuple[server.Server, list]) -> None:
+    app, _ = live_app
+    app.runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
+    assert app.runtime.redirect_flag_path.exists()
+    app.teardown_all()
+    assert not app.runtime.redirect_flag_path.exists()
+    assert app.runtime.load_state()['redirect'] == 'gpu-a'
 
 
 #---------------------------------------------------------------------

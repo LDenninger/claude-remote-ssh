@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,86 @@ def test_user_prompt_submit_injects_message_once(runtime: state.Runtime) -> None
 
 def test_post_tool_use_without_messages_has_no_output(runtime: state.Runtime) -> None:
     assert hooks.dispatch('PostToolUse', {'session_id': 'recv-0001', 'tool_name': 'Bash'}) is None
+
+
+def test_post_tool_use_injects_queued_context_once_with_messages(runtime: state.Runtime) -> None:
+    runtime.queue_context('gpu-a', 'remote-ssh: background connect\nconnected gpu-a')
+    relay.Store().deliver(relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'results are ready'))
+    context = hooks.dispatch('PostToolUse', {'session_id': 'recv-0001'})['hookSpecificOutput']['additionalContext']
+    assert context.index('connected gpu-a') < context.index('results are ready')
+    assert hooks.dispatch('PostToolUse', {'session_id': 'recv-0001'}) is None
+
+
+#---------------------------------------------------------------------
+# Shell fast path in hooks/hooks.json
+#---------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+def fake_root(tmp_path: Path) -> Path:
+    """Return a plugin root whose hook.py only reports that Python ran, and for which event."""
+    (tmp_path / 'plugin' / 'scripts').mkdir(parents=True)
+    (tmp_path / 'plugin' / 'scripts' / 'hook.py').write_text('import sys\nsys.stdin.read()\nprint("python", sys.argv[1])\n')
+    return tmp_path / 'plugin'
+
+
+def run_hook_command(event: str, fake_root: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run the hooks.json command of `event` as Claude Code does, with a 1 MB stdin payload.
+
+    The payload exceeds a pipe buffer, so a command that exits without reading stdin makes
+    the write fail with BrokenPipeError, which Claude Code reports as a hook error.
+    """
+    [entry] = json.loads((ROOT / 'hooks' / 'hooks.json').read_text())['hooks'][event]
+    command = entry['hooks'][0]['command'].replace('${CLAUDE_PLUGIN_ROOT}', str(fake_root))
+    payload = json.dumps({'session_id': 'recv-0001', 'tool_response': 'x' * 1_000_000})
+    proc = subprocess.Popen(['sh', '-c', command], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
+    proc.stdin.write(payload)
+    proc.stdin.close()
+    stdout, stderr = proc.stdout.read(), proc.stderr.read()
+    return subprocess.CompletedProcess(proc.args, proc.wait(timeout=10), stdout, stderr)
+
+
+@pytest.mark.parametrize('event', ['UserPromptSubmit', 'PostToolUse'])
+def test_message_hooks_start_python_only_for_waiting_work(runtime: state.Runtime, fake_root: Path, event: str) -> None:
+    env = dict(os.environ)
+    assert run_hook_command(event, fake_root, env).stdout == ''
+
+    #--- a delivered (read/) message is no work ---
+    msg = relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'hi')
+    relay.Store().deliver(msg)
+    relay.Store().claim('recv-0001', msg['id'])
+    result = run_hook_command(event, fake_root, env)
+    assert (result.returncode, result.stdout, result.stderr) == (0, '', '')
+
+    relay.Store().deliver(relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'hi again'))
+    assert run_hook_command(event, fake_root, env).stdout == f'python {event}\n'
+    relay.Store().claim('recv-0001', relay.Store().pending('recv-0001')[0]['id'])
+    assert run_hook_command(event, fake_root, env).stdout == ''
+
+    runtime.queue_context('gpu-a', 'block')
+    assert run_hook_command(event, fake_root, env).stdout == f'python {event}\n'
+
+
+def test_pre_tool_use_hook_starts_python_only_while_redirect_is_set(runtime: state.Runtime, fake_root: Path) -> None:
+    env = dict(os.environ)
+    assert run_hook_command('PreToolUse', fake_root, env).stdout == ''
+    set_redirect(runtime)
+    assert run_hook_command('PreToolUse', fake_root, env).stdout == 'python PreToolUse\n'
+    runtime.update_state(lambda saved: saved.update(redirect=None))
+    assert run_hook_command('PreToolUse', fake_root, env).stdout == ''
+
+
+def test_default_bases_in_hook_commands_match_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shell defaults glob /tmp/remote-ssh-* and expand $HOME like `state` does."""
+    monkeypatch.delenv('REMOTE_SSH_RUNTIME_BASE', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_MSG_BASE', raising=False)
+    commands = (ROOT / 'hooks' / 'hooks.json').read_text()
+    assert str(state.runtime_base()).startswith('/tmp/remote-ssh-')
+    assert '${REMOTE_SSH_RUNTIME_BASE:-/tmp/remote-ssh-*}' in commands
+    assert state.msg_base() == Path.home() / '.claude' / 'remote-ssh'
+    assert '${REMOTE_SSH_MSG_BASE:-$HOME/.claude/remote-ssh}' in commands
 
 
 #---------------------------------------------------------------------

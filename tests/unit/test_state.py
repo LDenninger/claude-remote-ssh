@@ -193,3 +193,48 @@ def test_update_state_serialises_concurrent_updates(runtime: Runtime) -> None:
     for worker in workers:
         worker.join()
     assert runtime.load_state()['count'] == 100
+
+
+#---------------------------------------------------------------------
+# Redirect flag and queued context
+#---------------------------------------------------------------------
+
+def test_redirect_flag_follows_state(runtime: Runtime) -> None:
+    assert not runtime.redirect_flag_path.exists()
+    runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
+    assert runtime.redirect_flag_path.exists()
+    runtime.update_state(lambda saved: saved.update(poll_interval_s=3))
+    assert runtime.redirect_flag_path.exists()
+    runtime.update_state(lambda saved: saved.update(redirect=None))
+    assert not runtime.redirect_flag_path.exists()
+
+
+def test_context_is_claimed_once_and_replaced_per_alias(runtime: Runtime) -> None:
+    assert runtime.claim_context() == []
+    runtime.queue_context('gpu-b', 'old b')
+    runtime.queue_context('gpu-b', 'new b')
+    runtime.queue_context('gpu-a', 'block a')
+    assert _mode(runtime.context_dir / 'gpu-a.md') == 0o600
+    assert runtime.claim_context() == ['block a', 'new b']
+    assert runtime.claim_context() == []
+    assert list(runtime.context_dir.iterdir()) == []
+
+
+def test_drop_context_removes_unclaimed_block(runtime: Runtime) -> None:
+    runtime.drop_context('gpu-a')
+    runtime.queue_context('gpu-a', 'block a')
+    runtime.drop_context('gpu-a')
+    assert runtime.claim_context() == []
+
+
+def test_concurrent_claimers_share_out_each_block_once(runtime: Runtime) -> None:
+    for ii in range(20):
+        runtime.queue_context(f'h{ii}', f'block {ii}')
+    results: list[list[str]] = []
+    threads = [threading.Thread(target=lambda: results.append(runtime.claim_context())) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    claimed = [block for blocks in results for block in blocks]
+    assert sorted(claimed) == sorted(f'block {ii}' for ii in range(20))

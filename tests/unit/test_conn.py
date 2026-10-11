@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -91,3 +92,16 @@ def test_run_never_inherits_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     master.run('cat', input=b'data')
     assert calls[0]['stdin'] is subprocess.DEVNULL
     assert calls[1]['stdin'] is None and calls[1]['input'] == b'data'
+
+
+def test_is_listening_tells_live_from_stale_socket(tmp_path: Path) -> None:
+    ctl = tmp_path / 'c'
+    master = Master('h', 'host', ctl)
+    assert not master.is_listening()
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(ctl))
+    listener.listen()
+    assert master.is_listening()
+    listener.close()
+    assert ctl.exists()
+    assert not master.is_listening()

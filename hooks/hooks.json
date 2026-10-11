@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" SessionStart"
+            "command": "python3 -S \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" SessionStart"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" SessionEnd",
+            "command": "python3 -S \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" SessionEnd",
             "timeout": 15
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" PreToolUse"
+            "command": "for f in ${REMOTE_SSH_RUNTIME_BASE:-/tmp/remote-ssh-*}/*/redirect-on; do [ -e \"$f\" ] && exec python3 -S \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" PreToolUse; done; exec cat >/dev/null"
           }
         ]
       }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" UserPromptSubmit"
+            "command": "b=\"${REMOTE_SSH_MSG_BASE:-$HOME/.claude/remote-ssh}\"; for f in \"$b\"/inbox/*/*.json ${REMOTE_SSH_RUNTIME_BASE:-/tmp/remote-ssh-*}/*/context/*.md; do [ -e \"$f\" ] && exec python3 -S \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" UserPromptSubmit; done; exec cat >/dev/null"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" PostToolUse"
+            "command": "b=\"${REMOTE_SSH_MSG_BASE:-$HOME/.claude/remote-ssh}\"; for f in \"$b\"/inbox/*/*.json ${REMOTE_SSH_RUNTIME_BASE:-/tmp/remote-ssh-*}/*/context/*.md; do [ -e \"$f\" ] && exec python3 -S \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.py\" PostToolUse; done; exec cat >/dev/null"
           }
         ]
       }

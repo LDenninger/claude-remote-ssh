@@ -15,8 +15,10 @@ All notable changes to this project are documented in this file. The format foll
   end.
 - Redirect mode: a `PreToolUse` hook rewrites `Bash` calls to run on the redirect target, with a
   `local:` prefix for local commands.
-- Remote memory index injected at session start and in `remote_connect` results.
+- Remote memory index injected at session start, in `remote_connect` results, and with the next
+  prompt or tool call after a background connect.
 - Messaging between Claude Code sessions on different machines through a plugin-owned inbox and
   outbox, delivered by a monitor and by hooks.
 - Per-project autoconnect through `.claude/remote-ssh.json`.
+- Hook commands that test for pending work in shell and start Python only when there is some.
 - Skills `remote`, `remote-connect` and `remote-status`.

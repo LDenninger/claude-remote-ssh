@@ -35,6 +35,7 @@ BACKOFF_MAX_S = 60.0
 OWNER_WAIT_S = 10.0
 WORKER_JOIN_S = 5.0
 RESOLVE_TIMEOUT_S = 30.0
+SSH_ERROR_EXIT = 255
 
 
 #---------------------------------------------------------------------
@@ -76,79 +77,76 @@ class Config:
 # Tool schemas
 #---------------------------------------------------------------------
 
-ALIAS_SCHEMA = {'type': 'string', 'pattern': state.ALIAS_RE, 'description': 'Host alias, 1 to 16 characters from [a-z0-9-].'}
+ALIAS_SCHEMA = {'type': 'string', 'pattern': state.ALIAS_RE}
 
 TOOLS: list[dict[str, Any]] = [
     {
         'name': 'remote_connect',
-        'description': 'Connect a remote host over SSH: start a ControlMaster, mount the remote path and its Claude memory, '
-                       'register this session for messaging. Returns mounts, reachable remote sessions and the remote memory index.',
+        'description': 'Connect a host over SSH, mount its project and Claude memory. Returns mounts, remote sessions and the memory index.',
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'alias': ALIAS_SCHEMA,
-                'host': {'type': 'string', 'description': 'ssh destination, e.g. an ~/.ssh/config Host or user@hostname.'},
-                'path': {'type': 'string', 'description': 'Remote project directory, absolute or ~-relative.'},
+                'host': {'type': 'string', 'description': 'ssh destination: config Host or user@host.'},
+                'path': {'type': 'string', 'description': 'Remote project dir, absolute or ~/.'},
             },
             'required': ['alias', 'host', 'path'],
         },
     },
     {
         'name': 'remote_disconnect',
-        'description': 'Disconnect a host: pull pending replies, unregister, unmount, stop the master.',
+        'description': 'Disconnect a host and release its mounts.',
         'inputSchema': {'type': 'object', 'properties': {'alias': ALIAS_SCHEMA}, 'required': ['alias']},
     },
     {
         'name': 'remote_status',
-        'description': 'Report every host: master, mounts, redirect target and missing local tools.',
+        'description': 'List hosts, mounts, redirect target and missing local tools.',
         'inputSchema': {'type': 'object', 'properties': {}},
     },
     {
         'name': 'remote_exec',
-        'description': 'Run a shell command on a connected host through bash -lc in the project path (or cwd). '
-                       'Returns stdout, stderr (last 30 000 characters each) and the exit code.',
+        'description': 'Run a command on a host with bash -lc in its project dir. Returns exit code, stdout and stderr (last 30 000 chars).',
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'alias': ALIAS_SCHEMA,
-                'command': {'type': 'string', 'description': 'Shell command, run by bash -lc.'},
-                'cwd': {'type': 'string', 'description': 'Remote working directory. Defaults to the connected path.'},
-                'timeout_s': {'type': 'integer', 'minimum': 1, 'default': 600, 'description': 'Kill the command after this many seconds.'},
+                'command': {'type': 'string'},
+                'cwd': {'type': 'string', 'description': 'Remote dir, default the project dir.'},
+                'timeout_s': {'type': 'integer', 'minimum': 1, 'default': 600},
             },
             'required': ['alias', 'command'],
         },
     },
     {
         'name': 'remote_mode',
-        'description': 'Set the redirect target: while set, Bash tool calls run on that host. null turns redirect off.',
+        'description': 'Run later Bash tool calls on a host, or locally again with null.',
         'inputSchema': {
             'type': 'object',
-            'properties': {'alias': {'type': ['string', 'null'], 'description': 'Connected alias, or null to run Bash locally again.'}},
+            'properties': {'alias': {'type': ['string', 'null'], 'description': 'Connected alias or null.'}},
             'required': ['alias'],
         },
     },
     {
         'name': 'remote_sessions',
-        'description': 'List Claude sessions registered for messaging on a host, or on this machine without alias.',
+        'description': 'List Claude sessions reachable for messaging on a host, or on this machine without alias.',
         'inputSchema': {'type': 'object', 'properties': {'alias': ALIAS_SCHEMA}},
     },
     {
         'name': 'remote_send',
-        'description': 'Send a message to another Claude session, by name or session id. With alias: a session on that host. '
-                       'Without alias: a session registered on this machine.',
+        'description': 'Message a Claude session on a host, or on this machine without alias.',
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'alias': ALIAS_SCHEMA,
-                'session': {'type': 'string', 'description': 'Target session name or session id (unique prefix accepted).'},
-                'body': {'type': 'string', 'description': 'Message text.'},
+                'session': {'type': 'string', 'description': 'Session name or id prefix.'},
+                'body': {'type': 'string'},
             },
             'required': ['session', 'body'],
         },
     },
     {
         'name': 'remote_inbox',
-        'description': 'List new and recently delivered messages for this session.',
+        'description': 'Show new and recent messages for this session.',
         'inputSchema': {'type': 'object', 'properties': {}},
     },
 ]
@@ -666,6 +664,7 @@ class Server:
         with session.lock:
             report = session.disconnect(self.__messaging_store(), self.messaging_session_id())
         self.runtime.update_state(drop)
+        self.runtime.drop_context(alias)
         lines = [f'disconnected {alias}', *report, f'Paths under {session.fs_dir.parent} no longer exist; earlier remote memory links are stale.']
         return '\n'.join(lines), False
 
@@ -758,6 +757,9 @@ class Server:
                     self.store.unregister(session_id)
                 except Exception:
                     LOG.exception('unregister failed')
+            #--- no host is connected now, and a restarted server's next state update restores the flag ---
+            if self.runtime is not None:
+                self.runtime.redirect_flag_path.unlink(missing_ok=True)
             self._torn_down = True
 
     def shutdown(self) -> None:
@@ -916,9 +918,15 @@ class Server:
         return '\n'.join(lines)
 
     def __connect_background(self, alias: str, host: str, path: str) -> None:
-        """Connect one host from startup recovery or autoconnect, logging the result."""
+        """Connect one host from startup recovery or autoconnect and queue its report for the session.
+
+        No tool result carries a background connect's report, so the next UserPromptSubmit
+        or PostToolUse hook injects it: mount paths and the remote memory index.
+        """
         text, is_error = self.connect_host(alias, host, path)
         (LOG.warning if is_error else LOG.info)('background connect %s: %s', alias, text.splitlines()[0])
+        if not is_error:
+            self.runtime.queue_context(alias, f'remote-ssh: background connect\n{text}')
 
     def __recover_previous(self) -> list[tuple[str, str, str]]:
         """Release whatever a previous server left in this runtime dir.
@@ -941,26 +949,43 @@ class Server:
     def __tick_host(self, session: HostSession, store: relay.Store | None, session_id: str | None) -> None:
         """Check one host and relay its outbox; the caller holds `session.lock`.
 
-        A due reconnect runs in its own thread so one dead host never delays another, and
-        that thread releases the lock. Every other path releases it here.
+        One ssh process per host and tick: with messaging on, the outbox pull doubles as
+        the health check, behind an in-process probe of the control socket, since ssh
+        falls back to a direct connection when the master is dead. With messaging off,
+        `-O check` asks the master over its local socket. A due reconnect runs in its own
+        thread so one dead host never delays another, and that thread releases the lock.
+        Every other path releases it here.
         """
         handed_over = False
         try:
             now = time.monotonic()
-            if session.status == 'connected' and not session.is_healthy():
-                LOG.warning('%s: master check failed, reconnecting', session.alias)
-                session.status, session.retry_at, session.retry_delay = 'reconnecting', now, 1.0
-                self.__save_host(session)
+            if session.status == 'connected':
+                if store is not None and session_id:
+                    healthy = session.master.is_listening() and self.__pull(session, session_id, store)
+                else:
+                    healthy = session.is_healthy()
+                if not healthy:
+                    LOG.warning('%s: master check failed, reconnecting', session.alias)
+                    session.status, session.retry_at, session.retry_delay = 'reconnecting', now, 1.0
+                    self.__save_host(session)
             if session.status == 'reconnecting' and now >= session.retry_at:
                 threading.Thread(target=self.__reconnect, args=(session,), daemon=True).start()
                 handed_over = True
-            elif session.status == 'connected' and store is not None and session_id:
-                relay.pull_outbox(session.master, session_id, store)
         except Exception:
             LOG.exception('%s: tick failed', session.alias)
         finally:
             if not handed_over:
                 session.lock.release()
+
+    def __pull(self, session: HostSession, session_id: str, store: relay.Store) -> bool:
+        """Pull the outbox of one host and return False only when ssh itself failed (exit 255)."""
+        try:
+            relay.pull_outbox(session.master, session_id, store)
+        except relay.RemoteCommandError as exc:
+            if exc.returncode == SSH_ERROR_EXIT:
+                return False
+            LOG.warning('%s: outbox pull failed: %s', session.alias, exc)
+        return True
 
     def __reconnect(self, session: HostSession) -> None:
         """Try one master restart with backoff; the caller handed over `session.lock`."""

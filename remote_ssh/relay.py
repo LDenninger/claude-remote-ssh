@@ -242,6 +242,22 @@ def _is_pid_alive(pid: Any) -> bool:
 # Remote side over a ControlMaster
 #---------------------------------------------------------------------
 
+class RemoteCommandError(RuntimeError):
+    """A remote command exited non-zero. Exit code 255 means ssh itself failed.
+
+    Args:
+        returncode: Exit code of the local ssh process.
+        stderr: Decoded, stripped stderr of the command.
+
+    Attributes:
+        returncode: Exit code of the local ssh process.
+    """
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        super().__init__(f'remote command failed ({returncode}): {stderr}')
+        self.returncode = returncode
+
+
 def _get_remote_base() -> str:
     """Return the remote messaging base as a shell word.
 
@@ -253,10 +269,10 @@ def _get_remote_base() -> str:
 
 
 def _run(master: Any, command: str, input: bytes | None = None) -> bytes:
-    """Run ``command`` through ``master`` and return stdout, raising RuntimeError on failure."""
+    """Run ``command`` through ``master`` and return stdout, raising RemoteCommandError on failure."""
     result = master.run(f'umask 077; {command}', input=input, timeout=REMOTE_TIMEOUT_S)
     if result.returncode != 0:
-        raise RuntimeError(f'remote command failed ({result.returncode}): {result.stderr.decode("utf-8", "replace").strip()}')
+        raise RemoteCommandError(result.returncode, result.stderr.decode('utf-8', 'replace').strip())
     return result.stdout
 
 

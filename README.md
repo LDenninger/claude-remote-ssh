@@ -13,10 +13,10 @@ commands, mounts the remote project and loads its memory, and all of it ends wit
 - **Messaging between machines:** sessions list each other, send messages and get replies in the
   conversation. All traffic runs over the local session's SSH connection, so servers never connect
   back.
-- **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Several hosts
-  connect at once.
 - **Remote commands:** `remote_exec` runs one command. Redirect mode sends every `Bash` call to a host,
   and `local:` keeps a command local.
+- **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Several hosts
+  connect at once.
 - **Project mounts:** the remote project is mounted with sshfs, so Read, Edit and Write work on it.
 - **Remote memory:** the remote project's `MEMORY.md` index is loaded beside your local memory.
 - **Low overhead:** hooks start Python only when a message or redirect is pending.

@@ -10,6 +10,9 @@ All notable changes to this project are documented in this file. The format foll
 
 - Every tool result and injected message follows one fixed output format: a first line `<tool> <host> · <facts>`,
   `key: value` lines, `--- name ---` blocks, and `reason:` plus `next:` on errors.
+- The MCP server is named `ssh`, so the chat shows `plugin:remote-ssh:ssh` instead of
+  `plugin:remote-ssh:remote-ssh`. Saved permission rules for the old tool names
+  (`mcp__plugin_remote-ssh_remote-ssh__*`) need to be renamed to `mcp__plugin_remote-ssh_ssh__*`.
 
 ## [0.1.0] - 2026-10-11
 

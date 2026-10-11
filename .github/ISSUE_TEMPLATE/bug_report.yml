@@ -1,7 +1,37 @@
 name: Bug report
 description: Something in remote-ssh does not work as documented
-labels: [bug]
+title: "[bug] "
+labels: [bug, triage]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove host names, user names and paths you do not want to share before submitting.
+        Security problems go to a private report instead: see SECURITY.md.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the open and closed issues for this problem.
+          required: true
+        - label: I read the Troubleshooting section of the README.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Connecting / reconnecting
+        - sshfs mount
+        - remote_exec or Bash redirect
+        - Remote memory
+        - Messaging between sessions
+        - Hooks or session start/end
+        - Installation or marketplace
+        - Other
+    validations:
+      required: true
   - type: textarea
     id: what
     attributes:
@@ -19,23 +49,41 @@ body:
         3. ...
     validations:
       required: true
-  - type: input
+  - type: textarea
     id: versions
     attributes:
       label: Versions
-      description: Output of `claude --version`, the plugin version, `ssh -V` and `sshfs --version`.
+      description: Paste the output of this command on the local machine.
+      placeholder: |
+        claude --version; claude plugin list | grep remote-ssh; ssh -V; sshfs --version 2>&1 | head -1; python3 --version; uname -sr
+      render: text
     validations:
       required: true
   - type: dropdown
-    id: os
+    id: local-os
     attributes:
       label: Local OS
       options: [Linux, macOS, other]
     validations:
       required: true
+  - type: input
+    id: remote-os
+    attributes:
+      label: Remote OS
+      placeholder: e.g. Ubuntu 22.04, Rocky Linux 9, macOS 15
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: How the host is reached
+      options:
+        - Direct
+        - ProxyJump / bastion
+        - Other (describe below)
   - type: textarea
     id: logs
     attributes:
       label: Server log
-      description: The relevant lines from `/tmp/remote-ssh-<uid>/<session>/server.log`. Remove host names you do not want to share.
+      description: The relevant lines from `/tmp/remote-ssh-<uid>/<session>/server.log`, and the output of the `remote_status` tool.
       render: text

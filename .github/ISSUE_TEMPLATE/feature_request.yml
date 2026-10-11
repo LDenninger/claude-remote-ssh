@@ -1,7 +1,15 @@
 name: Feature request
 description: Propose a new capability or a change in behaviour
-labels: [enhancement]
+title: "[feature] "
+labels: [enhancement, triage]
 body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the open and closed issues for this request.
+          required: true
   - type: textarea
     id: problem
     attributes:
@@ -13,4 +21,21 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: What you would like to happen. Mention the cost in hook time or tokens if you can estimate it.
+      description: What you would like to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other designs you thought about.
+  - type: textarea
+    id: overhead
+    attributes:
+      label: Cost in time and tokens
+      description: remote-ssh keeps hooks at a few milliseconds and tool descriptions short. Note anything this would add per tool call, per prompt, or per session.
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you open a pull request for this?
+      options: ["Yes", "With guidance", "No"]

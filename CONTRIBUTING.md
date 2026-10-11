@@ -28,6 +28,7 @@ claude plugin validate . --strict
 - Keep the hooks fast. They run on every tool call, so the common case must not start Python.
 - Keep the token footprint small. Tool and skill descriptions are loaded into every session.
 - Add a test that fails without your change.
+- Report security problems privately, see `SECURITY.md`.
 - Write commit messages in the imperative mood, one concern per commit.
 
 ## Releasing

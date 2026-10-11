@@ -13,6 +13,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Changed
 
+- Claude answers a remote-ssh action in one line without message ids, routes or tool names, and adds a
+  `next:` line only when the user has to act. The MCP server also sends this rule as its instructions.
 - Every tool result and injected message follows one fixed output format: a first line `<tool> <host> · <facts>`,
   `key: value` lines, `--- name ---` blocks, and `reason:` plus `next:` on errors.
 - The MCP server is named `ssh`, so the chat shows `plugin:remote-ssh:ssh` instead of

@@ -1226,6 +1226,14 @@ def rpc_error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
     return {'jsonrpc': '2.0', 'id': msg_id, 'error': {'code': code, 'message': message}}
 
 
+INSTRUCTIONS = (
+    'After a remote-ssh tool call, answer in one line with what matters to the user. Name hosts and sessions, '
+    'never message ids, routes, tool names or block names. Add a second line `next: <action>` only when the user '
+    'must do something. Replies to messages arrive in the conversation by themselves. Bold the host name and '
+    'counts, put paths and session names in code spans, and highlight nothing else.'
+)
+
+
 def handle_message(server: Server, msg: Any) -> dict[str, Any] | None:
     """Answer one JSON-RPC message.
 
@@ -1249,6 +1257,7 @@ def handle_message(server: Server, msg: Any) -> dict[str, Any] | None:
             'protocolVersion': params.get('protocolVersion') or DEFAULT_PROTOCOL,
             'capabilities': {'tools': {}},
             'serverInfo': {'name': 'remote-ssh', 'version': __version__},
+            'instructions': INSTRUCTIONS,
         }}
     if method == 'ping':
         return {'jsonrpc': '2.0', 'id': msg_id, 'result': {}}

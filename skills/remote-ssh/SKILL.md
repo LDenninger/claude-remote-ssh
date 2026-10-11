@@ -46,9 +46,11 @@ request does not already cover.
 
 ## Replying
 
-After a remote-ssh tool call, answer in two lines: a facts line, then `next: <action>`, omitted when
-there is nothing to suggest. Bold the host name and counts, put paths, session names and ids in code
-spans, and highlight nothing else: no headings, no further bold, no emoji, no colour words.
+After a remote-ssh tool call, answer in one line with what matters to the user. Name hosts and
+sessions, never message ids, routes, tool names or block names. Add a second line `next: <action>`
+only when the user must do something. Replies to messages arrive in the conversation by themselves.
+Bold the host name and counts, put paths and session names in code spans, and highlight nothing
+else.
 
     **gpu** connected · **1** session (`train-befb`) · bash local
-    next: ask `train-befb`, or run commands on **gpu**
+    Sent to `train-befb` on **gpu**.

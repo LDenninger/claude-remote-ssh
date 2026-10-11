@@ -820,3 +820,10 @@ def test_clear_moves_unread_messages_and_pulls_the_old_outbox(session_app: serve
     bodies = sorted(msg['body'] for msg in session_app.store.pending('new-0002'))
     assert bodies == ['late from the host', 'sent before clear']
     assert all(msg['to_session'] == 'new-0002' for msg in session_app.store.pending('new-0002'))
+
+
+def test_initialize_returns_the_reply_instructions() -> None:
+    reply = server.handle_message(None, {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}})
+    instructions = reply['result']['instructions']
+    assert 'never message ids, routes, tool names' in instructions
+    assert 'only when the user must do something' in instructions

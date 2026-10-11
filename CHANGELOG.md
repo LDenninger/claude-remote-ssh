@@ -24,6 +24,6 @@ All notable changes to this project are documented in this file. The format foll
   `.claude/remote-ssh.json` is ignored, with a note at session start.
 - Hook commands that test for pending work in shell and start Python only when there is some.
 - Redirect mode fails closed: a `Bash` call is denied while its host is not connected.
-- Relayed messages carry the host alias they were pulled from, and bodies are capped at 16 KB.
+- Relayed messages carry the host alias they were pulled from, and bodies are capped at 8 000 characters.
 - Remote memory follows Claude Code's per-repository memory directory, named after the git root.
 - Skills `remote-ssh`, `remote-connect` and `remote-status`.

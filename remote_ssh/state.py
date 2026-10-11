@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import stat
 import tempfile
 from collections.abc import Callable, Iterator
@@ -68,19 +69,37 @@ def msg_base() -> Path:
 
 
 def machine_id() -> str:
-    """Return the id of this machine, generated once and kept in `msg_base()/machine-id`.
+    """Return the id of this machine, generated once and kept in `msg_base()/machine-id.<hostname>`.
 
-    Hostnames repeat across machines, so remote registrations name their relay machine by
-    this id instead.
+    Hostnames repeat across machines, so remote registrations name their relay machine by this id
+    instead. The file name carries the hostname because the base may sit on a home directory shared
+    by several nodes, each of which needs an id of its own. The id is written to a temp file and
+    linked into place, so a concurrent reader sees no file or the complete id, never an empty one.
     """
-    id_path = ensure_private_dir(msg_base()) / 'machine-id'
+    host_tag = re.sub(r'[^A-Za-z0-9._-]', '_', socket.gethostname()) or 'host'
+    id_path = ensure_private_dir(msg_base()) / f'machine-id.{host_tag}'
+
+    def read_id() -> str:
+        try:
+            return id_path.read_text().strip()
+        except FileNotFoundError:
+            return ''
+
+    if read_id():
+        return read_id()
+    candidate = secrets.token_hex(8)
+    fd, tmp_name = tempfile.mkstemp(dir=id_path.parent, prefix='.machine-id.')
     try:
-        fd = os.open(id_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return id_path.read_text().strip()
-    with os.fdopen(fd, 'w') as id_file:
-        id_file.write(secrets.token_hex(8))
-    return id_path.read_text().strip()
+        with os.fdopen(fd, 'w') as tmp_file:
+            tmp_file.write(candidate)
+        try:
+            os.link(tmp_name, id_path)
+        except FileExistsError:
+            if not read_id():
+                os.replace(tmp_name, id_path)
+    finally:
+        Path(tmp_name).unlink(missing_ok=True)
+    return read_id()
 
 
 def iter_runtime_dirs() -> Iterator[Path]:

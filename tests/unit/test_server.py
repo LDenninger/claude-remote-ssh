@@ -498,10 +498,10 @@ def test_send_rejects_oversized_body(live_app: tuple[server.Server, list]) -> No
     app, _ = live_app
     app.runtime.update_owner(session_id='sid-0001', cwd='/w/proj')
     app.store.register('peer-0001', {'name': 'peer'})
-    text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * (relay.MAX_BODY_BYTES + 1)})
+    text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * (relay.MAX_BODY_CHARS + 1)})
     assert is_error and 'limit' in text
     assert app.store.pending('peer-0001') == []
-    text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * relay.MAX_BODY_BYTES})
+    text, is_error = app.call_tool('remote_send', {'session': 'peer-0001', 'body': 'x' * relay.MAX_BODY_CHARS})
     assert not is_error, text
 
 

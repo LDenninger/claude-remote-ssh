@@ -15,6 +15,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,11 @@ from remote_ssh import state
 ID_RE = re.compile(r'^[A-Za-z0-9-]{1,128}$')
 MSG_FILE_RE = re.compile(r'^\d+-[0-9a-f]{8}\.json$')
 REMOTE_TIMEOUT_S = 30
-MAX_BODY_BYTES = 16 * 1024
+MAX_BODY_CHARS = 8000
+MAX_READ_KEPT = 200
+MAX_PULL_MESSAGES = 100
+MAX_PULL_BYTES = 1024 * 1024
+FIELD_CAP = 64
 
 
 #---------------------------------------------------------------------
@@ -54,6 +59,22 @@ def new_message(from_session: str, from_name: str, from_host: str, to_session: s
         'sent_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
         'body': body,
     }
+
+
+def clean_text(value: Any, cap: int = FIELD_CAP) -> str:
+    """Return ``value`` as one printable line of at most ``cap`` characters.
+
+    Fields that come from a remote file are untrusted. Newlines and other control or format
+    characters become spaces, so a field can never open a line of its own in Claude's context.
+
+    Args:
+        value: Any value, converted with ``str``.
+        cap: Maximum length of the result.
+
+    Returns:
+        The sanitized text.
+    """
+    return ''.join(char if char.isprintable() else ' ' for char in str(value))[:cap]
 
 
 def session_name(cwd: str, sid: str) -> str:
@@ -179,6 +200,7 @@ class Store:
         """Move one message into ``read/`` and return it, if this caller wins the move.
 
         The rename is atomic, so among concurrent claimers of the same message exactly one gets it.
+        Delivered messages beyond the most recent ``MAX_READ_KEPT`` are deleted.
 
         Args:
             sid: Recipient session id.
@@ -193,7 +215,10 @@ class Store:
             os.rename(read_dir.parent / file_name, read_dir / file_name)
         except FileNotFoundError:
             return None
-        return state.read_json(read_dir / file_name)
+        msg = state.read_json(read_dir / file_name)
+        for old_path in self.__list_msg_files(read_dir)[:-MAX_READ_KEPT]:
+            old_path.unlink(missing_ok=True)
+        return msg
 
     def read_messages(self, sid: str, limit: int = 50) -> list[dict]:
         """Return up to ``limit`` most recent delivered messages of ``sid``, oldest first."""
@@ -206,16 +231,20 @@ class Store:
         return self.__list_msg_files(self.base / 'outbox' / _check_id(sid))
 
     def sweep(self, live_sids: set[str], max_age_s: float = 7 * 86400) -> None:
-        """Drop registrations of dead local sessions and stale message directories.
+        """Drop registrations of dead sessions of this node and stale message directories.
+
+        The pid of an entry is checked only when its ``host`` is this node's hostname, because a
+        base on a shared home directory also holds the entries of other nodes.
 
         Args:
             live_sids: Session ids known to be alive. They are never swept.
             max_age_s: Minimum age of an inbox or outbox directory of an unregistered session
                 before it is deleted. Defaults to seven days.
         """
+        hostname = socket.gethostname()
         for entry in self.sessions():
             sid = entry.get('session_id')
-            if sid in live_sids or entry.get('relay_via') or not ID_RE.match(str(sid)):
+            if sid in live_sids or entry.get('relay_via') or entry.get('host') != hostname or not ID_RE.match(str(sid)):
                 continue
             if not _is_pid_alive(entry.get('pid')):
                 self.unregister(sid)
@@ -323,16 +352,37 @@ def remote_sessions(master: Any) -> list[dict]:
     return entries
 
 
-def remote_deliver(master: Any, msg: dict) -> None:
-    """Write a message atomically into the remote inbox of its recipient."""
-    inbox_expr = f'{_get_remote_base()}/inbox/{shlex.quote(_check_id(msg["to_session"]))}'
-    _run(master, _build_write_cmd(inbox_expr, f'{_check_id(msg["id"])}.json'), input=json.dumps(msg).encode())
+def remote_deliver(master: Any, msg: dict, box: str = 'inbox') -> None:
+    """Write a message atomically into the remote ``inbox`` or ``outbox`` directory of its recipient."""
+    box_expr = f'{_get_remote_base()}/{box}/{shlex.quote(_check_id(msg["to_session"]))}'
+    _run(master, _build_write_cmd(box_expr, f'{_check_id(msg["id"])}.json'), input=json.dumps(msg).encode())
+
+
+def remote_send(master: Any, msg: dict, target: dict) -> str:
+    """Place a message for a session registered on the remote, mirroring ``Store.send``.
+
+    A target carrying ``relay_via`` runs on another machine that pulls the remote outbox, so a
+    message written to its inbox would never be read.
+
+    Args:
+        master: Connection to the remote.
+        msg: Message from ``new_message``.
+        target: Registry entry of the recipient on the remote.
+
+    Returns:
+        ``"outbox"`` or ``"inbox"``, naming where the message was written.
+    """
+    box = 'outbox' if target.get('relay_via') else 'inbox'
+    remote_deliver(master, msg, box)
+    return box
 
 
 def pull_outbox(master: Any, sid: str, store: Store, timeout: float = REMOTE_TIMEOUT_S) -> int:
     """Move the remote outbox of ``sid`` into the local inbox.
 
-    One round trip lists and reads every message file. Each valid message is delivered locally
+    One round trip lists and reads the message files, at most ``MAX_PULL_MESSAGES`` of them and
+    ``MAX_PULL_BYTES`` in total, and the rest waits for the next pull. A single file larger than
+    ``MAX_PULL_BYTES`` cannot be a valid message and is deleted unread. Each valid message is delivered locally
     with ``relayed_from`` set to the master's alias, the provenance the plugin vouches for, then
     a second round trip removes exactly the pulled names, so a file that arrived after the
     listing stays for the next pull. A message that is not addressed to ``sid`` or whose id does
@@ -352,8 +402,11 @@ def pull_outbox(master: Any, sid: str, store: Store, timeout: float = REMOTE_TIM
         subprocess.TimeoutExpired: A round trip outlived ``timeout``.
     """
     outbox_expr = f'{_get_remote_base()}/outbox/{shlex.quote(_check_id(sid))}'
-    command = (f'cd {outbox_expr} 2>/dev/null || exit 0; '
-               f'for f in *.json; do [ -f "$f" ] || continue; printf "%s\\0" "$f"; cat -- "$f"; printf "\\0"; done; true')
+    command = (f'cd {outbox_expr} 2>/dev/null || exit 0; n=0; sz=0; '
+               f'for f in *.json; do [ -f "$f" ] || continue; s=$(wc -c < "$f"); '
+               f'if [ "$s" -gt {MAX_PULL_BYTES} ]; then rm -- "$f" 2>/dev/null; continue; fi; '
+               f'[ "$n" -ge {MAX_PULL_MESSAGES} ] && break; [ $((sz + s)) -gt {MAX_PULL_BYTES} ] && break; '
+               f'n=$((n + 1)); sz=$((sz + s)); printf "%s\\0" "$f"; cat -- "$f"; printf "\\0"; done; true')
     records = _split_nul(_run(master, command, timeout=timeout))
     done, delivered = [], 0
     for file_name_raw, content in zip(records[0::2], records[1::2]):
@@ -376,6 +429,8 @@ def pull_outbox(master: Any, sid: str, store: Store, timeout: float = REMOTE_TIM
 
 def remote_cleanup(master: Any, machine: str, live_sids: set[str]) -> None:
     """Remove remote session entries relayed through ``machine`` whose session is not alive.
+
+    Entries whose ``relay_via`` differs from ``machine`` belong to other machines and are kept.
 
     Args:
         master: Connection to the remote.

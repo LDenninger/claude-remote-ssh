@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import stat
 import subprocess
 import threading
@@ -169,7 +170,7 @@ def test_claim_exactly_once_across_processes(tmp_path: Path) -> None:
     for msg in msgs:
         Store(base).deliver(msg)
     script = ('import json, sys\nfrom pathlib import Path\nfrom remote_ssh.inbox import claim_pending\nfrom remote_ssh.relay import Store\n'
-              'print(json.dumps([m["id"] for m in claim_pending(Store(Path(sys.argv[1])), "sid")]))\n')
+              'print(json.dumps([m["id"] for m in claim_pending(Store(Path(sys.argv[1])), "sid", limit=None)]))\n')
     repo_root = Path(__file__).resolve().parents[2]
     procs = [subprocess.Popen(['python3', '-c', script, str(base)], cwd=repo_root, stdout=subprocess.PIPE) for _ in range(3)]
     results = [json.loads(proc.communicate(timeout=60)[0]) for proc in procs]
@@ -180,10 +181,11 @@ def test_claim_exactly_once_across_processes(tmp_path: Path) -> None:
 def test_sweep(store: Store, tmp_path: Path) -> None:
     dead = subprocess.Popen(['true'])
     dead.wait()
-    store.register('dead-sid', {'pid': dead.pid})
-    store.register('alive-sid', {'pid': os.getpid()})
-    store.register('relay-sid', {'pid': dead.pid, 'relay_via': 'laptop'})
-    store.register('live-sid', {'pid': dead.pid})
+    host = socket.gethostname()
+    store.register('dead-sid', {'pid': dead.pid, 'host': host})
+    store.register('alive-sid', {'pid': os.getpid(), 'host': host})
+    store.register('relay-sid', {'pid': dead.pid, 'host': host, 'relay_via': 'laptop'})
+    store.register('live-sid', {'pid': dead.pid, 'host': host})
     store.deliver(_msg('gone-sid'))
     store.deliver(_msg('fresh-sid'))
     old = time.time() - 8 * 86400

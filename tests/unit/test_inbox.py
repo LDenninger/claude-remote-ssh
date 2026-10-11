@@ -27,10 +27,10 @@ def test_format_names_relay_host_recorded_by_plugin() -> None:
 
 
 def test_format_caps_body() -> None:
-    body = 'line\n' + 'x' * (2 * relay.MAX_BODY_BYTES)
+    body = 'line\n' + 'x' * (2 * relay.MAX_BODY_CHARS)
     text = inbox.format_message(_msg(body))
-    assert len(text.encode()) < relay.MAX_BODY_BYTES + 500
-    assert f'[truncated: {len(body.encode())} bytes, first {relay.MAX_BODY_BYTES} shown]' in text
+    assert len(text.encode()) < relay.MAX_BODY_CHARS + 500
+    assert f'[truncated: {len(body)} characters, first {relay.MAX_BODY_CHARS} shown]' in text
     assert '\nline\n' not in text and '> line\n' in text
 
 

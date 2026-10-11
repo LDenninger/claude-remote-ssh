@@ -73,7 +73,7 @@ def test_machine_id_is_generated_once(tmp_path: Path, monkeypatch: pytest.Monkey
     first = state.machine_id()
     assert len(first) == 16 and int(first, 16) >= 0
     assert state.machine_id() == first
-    assert _mode(tmp_path / 'a' / 'machine-id') == 0o600
+    assert _mode(next((tmp_path / 'a').glob('machine-id.*'))) == 0o600
     monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'b'))
     assert state.machine_id() != first
 

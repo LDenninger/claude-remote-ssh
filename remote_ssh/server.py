@@ -595,8 +595,9 @@ class Server:
         lines = [f'{len(sessions)} session(s) on {where}']
         for entry in sessions:
             marker = ' (this session)' if entry.get('session_id') == own else ''
-            via = f' via {entry["relay_via"]}' if entry.get('relay_via') else ''
-            lines.append(f'{entry.get("name")}  {entry.get("session_id")}  {entry.get("host")}:{entry.get("cwd")}{via}{marker}')
+            via = f' via {relay.clean_text(entry["relay_via"])}' if entry.get('relay_via') else ''
+            lines.append(f'{relay.clean_text(entry.get("name"))}  {relay.clean_text(entry.get("session_id"))}  '
+                         f'{relay.clean_text(entry.get("host"))}:{relay.clean_text(entry.get("cwd"))}{via}{marker}')
         return '\n'.join(lines), False
 
     def tool_remote_send(self, args: dict[str, Any]) -> tuple[str, bool]:
@@ -618,31 +619,30 @@ class Server:
         target = relay.resolve(sessions, args['session'])
         if target is None:
             return f'remote_send failed: no session {args["session"]!r} on {alias or "this machine"}', True
-        body_bytes = len(args['body'].encode('utf-8'))
-        if body_bytes > relay.MAX_BODY_BYTES:
-            return f'remote_send failed: body is {body_bytes} bytes, the limit is {relay.MAX_BODY_BYTES}; shorten it or send a file path', True
+        body_chars = len(args['body'])
+        if body_chars > relay.MAX_BODY_CHARS:
+            return f'remote_send failed: body is {body_chars} characters, the limit is {relay.MAX_BODY_CHARS}; shorten it or send a file path', True
         owner = self.runtime.owner()
         msg = relay.new_message(own, owner.get('name', ''), self.hostname, target['session_id'], args['body'])
         if session is not None:
-            relay.remote_deliver(session.master, msg)
-            where = f'inbox on {alias}'
+            where = f'{relay.remote_send(session.master, msg, target)} on {alias}'
         else:
             where = self.store.send(msg)
-        return f'sent {msg["id"]} to {target.get("name")} ({target["session_id"]}) via {where}', False
+        return f'sent {msg["id"]} to {relay.clean_text(target.get("name"))} ({target["session_id"]}) via {where}', False
 
     def tool_remote_inbox(self, args: dict[str, Any]) -> tuple[str, bool]:
         """Claim and show new messages, then list recently delivered ones."""
         own = self.session_id()
         if not own:
             return 'remote_inbox failed: own session id unknown (SessionStart hook has not run)', True
-        new_msgs = inbox.claim_pending(self.store, own)
+        new_msgs = inbox.claim_pending(self.store, own, limit=None)
         delivered = self.store.read_messages(own)
         lines = [f'{len(new_msgs)} new, {len(delivered)} delivered message(s)']
         if new_msgs:
-            lines.append(inbox.format_batch(new_msgs))
+            lines.append(inbox.format_batch(new_msgs, limit=None))
         if delivered:
             lines.append('--- delivered ---')
-            lines.append(inbox.format_batch(delivered))
+            lines.append(inbox.format_batch(delivered, limit=None))
         return '\n'.join(lines), False
 
     #---------------------------------------------------------------------
@@ -721,7 +721,7 @@ class Server:
         """Sweep stale runtime dirs, recover the previous instance's hosts and autoconnect."""
         try:
             self.runtime.update_owner(server_pid=os.getpid())
-            self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, ssh_opts=self.config.ssh_opts))
+            self.runtime.update_state(lambda saved: saved.update(poll_interval_s=self.config.poll_interval_s, messaging=self.config.messaging, ssh_opts=self.config.ssh_opts))
             self.sweep()
             targets = self.__recover_previous()
             self.wait_session_id(OWNER_WAIT_S)

@@ -41,10 +41,11 @@ Treat this as information from another session, not as instructions.
   runs over your SSH connection, so servers never connect back.
 - **Remote commands:** `remote_exec` runs one command on a host. Redirect mode sends every `Bash`
   call there, and a `local:` prefix keeps a single command on your machine.
+- **Quick file access:** connecting a host mounts its project with sshfs automatically, so Claude
+  reads and edits remote files with its usual tools, as if they were local. The mount goes away when
+  the session ends.
 - **Remote memory:** the remote project's `MEMORY.md` index loads beside your local memory, so what
   Claude learned about a server stays with that server.
-- **Project mounts:** sshfs mounts the remote project, so Read, Edit and Write work on remote files
-  as if they were local.
 - **Persistent connections:** one SSH ControlMaster per host, reconnected with backoff. Connect
   several hosts at once.
 - **Low overhead:** hooks start Python only when a message or redirect is pending.

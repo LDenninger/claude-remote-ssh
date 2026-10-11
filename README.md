@@ -1,8 +1,6 @@
 # claude-remote-ssh
 
-[![CI](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![CI](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.
 

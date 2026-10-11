@@ -65,7 +65,7 @@ def test_new_message_fields_and_sortable_ids() -> None:
     assert first['sent_at'].endswith('+00:00')
 
 
-def test_session_name() -> None:
+def test_session_name_joins_directory_and_id_prefix() -> None:
     assert relay.session_name('/home/u/proj', 'abcdef12') == 'proj-abcd'
     assert relay.session_name('/', 'abcdef12') == 'root-abcd'
 
@@ -84,7 +84,7 @@ def test_resolve_by_name_id_and_prefix() -> None:
 # Local store
 #---------------------------------------------------------------------
 
-def test_register_sessions_unregister(store: Store) -> None:
+def test_register_lists_and_unregister_removes_sessions(store: Store) -> None:
     store.register('sid-1', {'name': 'proj-sid-', 'pid': os.getpid()})
     assert store.sessions() == [{'name': 'proj-sid-', 'pid': os.getpid(), 'session_id': 'sid-1'}]
     assert stat.S_IMODE((store.base / 'sessions').stat().st_mode) == 0o700
@@ -178,7 +178,7 @@ def test_claim_exactly_once_across_processes(tmp_path: Path) -> None:
     assert sorted(all_won) == sorted(msg['id'] for msg in msgs)
 
 
-def test_sweep(store: Store, tmp_path: Path) -> None:
+def test_sweep_removes_dead_local_sessions_and_keeps_relayed_and_live_ones(store: Store, tmp_path: Path) -> None:
     dead = subprocess.Popen(['true'])
     dead.wait()
     host = socket.gethostname()
@@ -207,7 +207,7 @@ def test_remote_base_default_expands_home(monkeypatch: pytest.MonkeyPatch) -> No
     assert '"$HOME/.claude/remote-ssh"/sessions/*.json' in master.commands[0]
 
 
-def test_remote_register_sessions_unregister(remote_base: Path) -> None:
+def test_remote_register_lists_and_unregister_removes_sessions(remote_base: Path) -> None:
     master = FakeMaster()
     relay.remote_register(master, 'sid-a', {'name': 'proj-sid-', 'relay_via': 'laptop'})
     relay.remote_register(master, 'sid-b', {'name': "it's odd"})
@@ -273,7 +273,7 @@ def test_pull_outbox_drops_misaddressed_and_renamed_messages(remote_base: Path, 
     assert set(master.timeouts) == {4}
 
 
-def test_has_pending(store: Store) -> None:
+def test_has_pending_follows_delivery_and_claim(store: Store) -> None:
     assert not store.has_pending('sid')
     msg = _msg('sid')
     store.deliver(msg)
@@ -292,7 +292,7 @@ def test_pull_outbox_missing_dir(remote_base: Path, store: Store) -> None:
     assert relay.pull_outbox(FakeMaster(), 'nobody', store) == 0
 
 
-def test_remote_cleanup(remote_base: Path) -> None:
+def test_remote_cleanup_removes_stale_entries_of_this_machine(remote_base: Path) -> None:
     master = FakeMaster()
     relay.remote_register(master, 'live-sid', {'relay_via': 'laptop'})
     relay.remote_register(master, 'stale-sid', {'relay_via': 'laptop'})
@@ -302,8 +302,80 @@ def test_remote_cleanup(remote_base: Path) -> None:
     assert sorted(entry['session_id'] for entry in relay.remote_sessions(master)) == ['live-sid', 'native-sid', 'other-host-sid']
 
 
-def test_remote_failure_raises(remote_base: Path) -> None:
+def test_remote_register_raises_when_the_command_fails(remote_base: Path) -> None:
     remote_base.mkdir()
     (remote_base / 'sessions').write_text('a file, not a directory')
     with pytest.raises(RuntimeError):
         relay.remote_register(FakeMaster(), 'sid', {})
+
+
+#---------------------------------------------------------------------
+# Shared home directories and bounded mailboxes
+#---------------------------------------------------------------------
+
+def _stamped_msg(body: str = 'hi', to: str = 'sid', **fields: str) -> dict:
+    return {**relay.new_message('abcdef1234567890', 'proj-abcd', 'laptop', to, body), 'sent_at': '2026-10-11T12:00:00+00:00', **fields}
+
+
+def test_sweep_checks_pids_only_of_this_node(tmp_path: Path) -> None:
+    dead = subprocess.Popen(['true'])
+    dead.wait()
+    store = Store(tmp_path)
+    store.register('mine-dead', {'pid': dead.pid, 'host': socket.gethostname()})
+    store.register('other-node', {'pid': dead.pid, 'host': 'node-other'})
+    store.sweep(set())
+    assert {entry['session_id'] for entry in store.sessions()} == {'other-node'}
+
+
+def test_remote_cleanup_keeps_entries_of_other_nodes(remote_base: Path) -> None:
+    master = FakeMaster()
+    relay.remote_register(master, 'mine-stale', {'relay_via': 'node1-id'})
+    relay.remote_register(master, 'other-node', {'relay_via': 'node2-id'})
+    relay.remote_cleanup(master, 'node1-id', set())
+    assert [entry['session_id'] for entry in relay.remote_sessions(master)] == ['other-node']
+
+
+def test_read_directory_keeps_most_recent_200(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    for ii in range(205):
+        msg = {**_stamped_msg(str(ii)), 'id': f'{1000 + ii}-{ii:08x}'}
+        store.deliver(msg)
+        store.claim('sid', msg['id'])
+    kept = sorted(path.name for path in (tmp_path / 'inbox' / 'sid' / 'read').glob('*.json'))
+    assert len(kept) == relay.MAX_READ_KEPT == 200
+    assert kept[0].startswith('1005-') and kept[-1].startswith('1204-')
+
+
+def test_pull_outbox_caps_messages_per_poll(remote_base: Path, tmp_path: Path) -> None:
+    remote_store, local = relay.Store(remote_base), Store(tmp_path / 'local')
+    remote_store.register('local-sid', {'relay_via': 'm'})
+    for ii in range(130):
+        remote_store.send({**_stamped_msg('x', to='local-sid'), 'id': f'{1000 + ii}-{ii:08x}'})
+    master = FakeMaster()
+    assert relay.pull_outbox(master, 'local-sid', local) == 100
+    assert len(remote_store.outbox_files('local-sid')) == 30
+    assert relay.pull_outbox(master, 'local-sid', local) == 30
+    assert remote_store.outbox_files('local-sid') == []
+
+
+def test_pull_outbox_caps_bytes_per_poll(remote_base: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(relay, 'MAX_PULL_BYTES', 4000)
+    remote_store, local = relay.Store(remote_base), Store(tmp_path / 'local')
+    remote_store.register('local-sid', {'relay_via': 'm'})
+    for ii in range(5):
+        remote_store.send({**_stamped_msg('y' * 1500, to='local-sid'), 'id': f'{1000 + ii}-{ii:08x}'})
+    master = FakeMaster()
+    first = relay.pull_outbox(master, 'local-sid', local)
+    assert 0 < first < 5
+    assert len(remote_store.outbox_files('local-sid')) == 5 - first
+    assert relay.pull_outbox(master, 'local-sid', local) > 0
+
+
+def test_pull_outbox_drops_a_file_larger_than_the_budget(remote_base: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(relay, 'MAX_PULL_BYTES', 1000)
+    remote_store, local = relay.Store(remote_base), Store(tmp_path / 'local')
+    remote_store.register('local-sid', {'relay_via': 'm'})
+    remote_store.send({**_stamped_msg('z' * 5000, to='local-sid'), 'id': '1000-00000000'})
+    remote_store.send({**_stamped_msg('ok', to='local-sid'), 'id': '1001-00000001'})
+    assert relay.pull_outbox(FakeMaster(), 'local-sid', local) == 1
+    assert remote_store.outbox_files('local-sid') == []

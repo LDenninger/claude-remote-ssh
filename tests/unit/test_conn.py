@@ -73,7 +73,7 @@ def test_master_argv_end_options_before_destination(tmp_path: Path, monkeypatch:
         assert argv[argv.index('gpu') - 1] == '--', argv
 
 
-def test_expand_remote_path() -> None:
+def test_expand_remote_path_maps_tilde_to_home_relative_path() -> None:
     assert expand_remote_path('~') == '.'
     assert expand_remote_path('~/my proj') == "'my proj'"
     assert expand_remote_path('/srv/x') == '/srv/x'
@@ -137,13 +137,13 @@ def test_remote_timeout_passes_exit_code_through_without_gnu_timeout(tmp_path: P
     assert time.monotonic() - started < 5
 
 
-def test_tail() -> None:
+def test_tail_truncates_to_the_last_n_characters() -> None:
     assert tail('abc') == 'abc'
     assert tail('x' * TRUNCATE) == 'x' * TRUNCATE
     assert tail('abcdef', n=3) == '[truncated]\ndef'
 
 
-def test_ssh_argv() -> None:
+def test_ssh_argv_uses_control_socket_without_becoming_a_master() -> None:
     assert Master('a', 'h', Path('/run/c')).ssh_argv() == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no']
 
 
@@ -195,3 +195,25 @@ def test_is_listening_tells_live_from_stale_socket(short_tmp: Path) -> None:
     listener.close()
     assert ctl.exists()
     assert not master.is_listening()
+
+
+#---------------------------------------------------------------------
+# ControlMaster=no on every non-master ssh call
+#---------------------------------------------------------------------
+
+def test_exec_argv_and_ssh_argv_never_become_a_master() -> None:
+    assert exec_argv(Path('/c'), 'h', 'ls', None)[3:7] == ['-o', 'BatchMode=yes', '-o', 'ControlMaster=no']
+    assert Master('a', 'h', Path('/c'), ['-p', '1']).ssh_argv() == ['ssh', '-S', '/c', '-o', 'BatchMode=yes', '-o', 'ControlMaster=no', '-p', '1']
+
+
+def test_check_and_stop_pass_control_master_no(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0, b'', b''))
+    ctl = tmp_path / 'c'
+    ctl.touch()
+    master = Master('a', 'h', ctl)
+    assert master.check()
+    master.stop()
+    assert [call[call.index('-O') + 1] for call in calls] == ['check', 'exit']
+    for call in calls:
+        assert ['-o', 'ControlMaster=no'] == call[3:5]

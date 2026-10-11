@@ -26,12 +26,12 @@ def test_proc_start_stable_for_self_and_none_for_missing() -> None:
     assert ident.proc_start(2**22 + 12345) is None
 
 
-def test_parent_of_self() -> None:
+def test_parent_of_returns_ppid_and_none_for_missing_pid() -> None:
     assert ident.parent_of(os.getpid()) == os.getppid()
     assert ident.parent_of(2**22 + 12345) is None
 
 
-def test_alive_detects_exit() -> None:
+def test_alive_is_false_for_a_different_start_token() -> None:
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     try:
         proc = ClaudeProc(child.pid, ident.proc_start(child.pid))
@@ -43,7 +43,7 @@ def test_alive_detects_exit() -> None:
     assert not ident.alive(proc)
 
 
-def test_is_claude_false_for_python() -> None:
+def test_is_claude_is_false_for_non_claude_and_missing_pids() -> None:
     assert not ident.is_claude(os.getpid())
     assert not ident.is_claude(2**22 + 12345)
 
@@ -56,7 +56,7 @@ def test_is_claude_false_for_python() -> None:
     ('node', '/usr/bin/node', ['node', 'server.js'], False),
     ('bash', '/usr/bin/bash', ['bash', '-c', 'claude-wrapper'], False),
 ])
-def test_looks_like_claude(comm: str, exe: str, argv: list[str], expected: bool) -> None:
+def test_looks_like_claude_matches_process_name_and_executable(comm: str, exe: str, argv: list[str], expected: bool) -> None:
     assert ident._looks_like_claude(comm, exe, argv) is expected
 
 

@@ -14,6 +14,7 @@ import pytest
 
 import remote_ssh
 from remote_ssh.conn import Master
+from remote_ssh.mount import MountError, sshfs_argv, ssh_command_option
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ def test_sshfs_argv_mac_extra(mount_mod: types.ModuleType, monkeypatch: pytest.M
     ]
 
 
-def test_mount_raises_with_stderr(mount_mod: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_mount_failure_raises_with_sshfs_stderr(mount_mod: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, b'', b'fuse: device not found'))
     with pytest.raises(mount_mod.MountError, match='fuse: device not found'):
         mount_mod.mount(Master('a', 'h', Path('/run/c')), '/srv', tmp_path / 'fs')
@@ -123,3 +124,18 @@ def test_is_mounted_counts_dead_mount_without_mount_table(tmp_path, monkeypatch)
     monkeypatch.setattr(mount_mod.os, 'lstat', lstat)
     assert mount_mod.is_mounted(dead)
     assert not mount_mod.is_mounted(tmp_path / 'missing')
+
+
+#---------------------------------------------------------------------
+# sshfs ssh_command option
+#---------------------------------------------------------------------
+
+def test_ssh_command_escapes_spaces_and_backslashes_without_quotes() -> None:
+    master = Master('a', 'h', Path('/run/my dir/c'), ['-i', '/k/a\\b c'])
+    assert ssh_command_option(master) == 'ssh -S /run/my\\ dir/c -o BatchMode=yes -o ControlMaster=no -i /k/a\\\\b\\ c'
+    assert "'" not in ssh_command_option(master)
+
+
+def test_ssh_command_rejects_comma() -> None:
+    with pytest.raises(MountError, match='comma'):
+        sshfs_argv(Master('a', 'h', Path('/run/c,d')), '/p', Path('/m'))

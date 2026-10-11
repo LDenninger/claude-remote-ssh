@@ -1,4 +1,4 @@
-"""Integration tests I1 to I4: connect, exec, mounts, failure isolation, reconnect, teardown."""
+"""Integration tests of the host lifecycle: connect, exec, mounts, failure isolation, reconnect and teardown."""
 
 from __future__ import annotations
 
@@ -32,10 +32,10 @@ def master_pids(rt: Path, alias: str) -> list[int]:
 
 
 #---------------------------------------------------------------------
-# I1
+# Connect, exec, mount and disconnect
 #---------------------------------------------------------------------
 
-def test_i1_connect_exec_mount_disconnect(session: Any, sshd: dict, remote_dir: Path) -> None:
+def test_connect_exec_mount_and_disconnect(session: Any, sshd: dict, remote_dir: Path) -> None:
     (remote_dir / 'hello.txt').write_text('hello\n')
     sess = session('a')
 
@@ -83,10 +83,10 @@ def test_disconnect_releases_mount_whose_remote_directory_vanished(session: Any,
 
 
 #---------------------------------------------------------------------
-# I2
+# Two hosts and failure isolation
 #---------------------------------------------------------------------
 
-def test_i2_two_hosts_and_one_failure(session: Any, sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
+def test_failing_host_does_not_affect_the_other_host(session: Any, sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
     other_dir = (tmp_path / 'remote-other').resolve()
     other_dir.mkdir()
     sess = session('a')
@@ -122,7 +122,7 @@ def test_i2_two_hosts_and_one_failure(session: Any, sshd: dict, remote_dir: Path
     assert (other_dir / 'x.txt').read_text() == 'x'
 
 
-def test_i2_missing_remote_directory_fails_clearly(session: Any, sshd: dict, tmp_path: Path) -> None:
+def test_missing_remote_directory_fails_with_clear_error(session: Any, sshd: dict, tmp_path: Path) -> None:
     sess = session('a')
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(tmp_path / 'absent'))
     assert is_error
@@ -131,10 +131,10 @@ def test_i2_missing_remote_directory_fails_clearly(session: Any, sshd: dict, tmp
 
 
 #---------------------------------------------------------------------
-# I3
+# Reconnect after a killed master
 #---------------------------------------------------------------------
 
-def test_i3_master_killed_reconnects_and_remounts(session: Any, sshd: dict, remote_dir: Path) -> None:
+def test_killed_master_reconnects_and_remounts(session: Any, sshd: dict, remote_dir: Path) -> None:
     (remote_dir / 'before.txt').write_text('before\n')
     sess = session('a')
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
@@ -150,7 +150,7 @@ def test_i3_master_killed_reconnects_and_remounts(session: Any, sshd: dict, remo
         return bool(pids) and old_pid not in pids and 'h1: connected' in status and 'master up' in status
 
     assert wait_for(reconnected, RECONNECT_LIMIT_S, interval=0.5), sess.mcp.call('remote_status')[0]
-    print(f'\nI3: master back after {time.monotonic() - killed_at:.1f} s')
+    print(f'\nmaster back after {time.monotonic() - killed_at:.1f} s')
 
     fs_dir = sess.rt / 'h1' / 'fs'
     assert wait_for(lambda: os.path.ismount(fs_dir), RECONNECT_LIMIT_S - (time.monotonic() - killed_at))
@@ -181,10 +181,10 @@ def test_remote_exec_timeout_leaves_no_remote_process(session: Any, sshd: dict, 
 
 
 #---------------------------------------------------------------------
-# I4
+# Teardown
 #---------------------------------------------------------------------
 
-def test_session_end_with_frozen_host_releases_everything_within_10s(session: Any, sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
+def test_session_end_with_frozen_host_releases_everything(session: Any, sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
     """The remote stops answering: the sshd processes of this session's connection are SIGSTOPped."""
     sess = session('a')
     text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
@@ -217,7 +217,7 @@ def test_session_end_with_frozen_host_releases_everything_within_10s(session: An
     assert text.startswith('no hosts connected'), text
 
 
-def test_i4_sigkill_of_parent_claude_tears_down_within_10s(sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
+def test_sigkill_of_parent_claude_tears_everything_down(sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
     """The stand-in Claude is the server's parent shell, as Claude is for a real server."""
     rt_root = tmp_path / 'rt'
     env = base_env(sshd, tmp_path, 'a')
@@ -252,7 +252,7 @@ def test_i4_sigkill_of_parent_claude_tears_down_within_10s(sshd: dict, remote_di
 
         done = wait_for(torn_down, 20, interval=0.05)
         elapsed = time.monotonic() - killed_at
-        print(f'\nI4: teardown after SIGKILL of the Claude stand-in took {elapsed:.2f} s')
+        print(f'\nteardown after SIGKILL of the Claude stand-in took {elapsed:.2f} s')
         assert done, 'teardown incomplete after 20 s'
         assert elapsed <= TEARDOWN_LIMIT_S
         assert_released(rt, 'h1')

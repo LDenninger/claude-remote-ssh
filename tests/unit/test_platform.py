@@ -7,7 +7,7 @@ import pytest
 from remote_ssh import platform
 
 
-def test_detect_keys() -> None:
+def test_detect_reports_all_tool_keys() -> None:
     detected = platform.detect()
     assert set(detected) == {'ssh', 'sshfs', 'fuse', 'python'}
     assert detected['python'] is True
@@ -19,7 +19,7 @@ def test_detect_linux_fuse_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     assert platform.detect() == {'ssh': False, 'sshfs': False, 'fuse': True, 'python': False}
 
 
-def test_missing() -> None:
+def test_missing_lists_unavailable_tools() -> None:
     assert platform.missing({'ssh': True, 'sshfs': False, 'fuse': False, 'python': True}) == ['sshfs', 'fuse']
     assert platform.missing({'ssh': True}) == []
 

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from remote_ssh import hooks, memory, relay, server, state
+from remote_ssh import hooks, memory, platform, relay, server, state
 
 
 @pytest.fixture
@@ -151,7 +151,9 @@ def test_session_start_injects_the_cached_index_and_never_reads_the_mount(runtim
     (mount_dir / 'MEMORY.md').unlink()
 
 
-def test_session_start_skips_a_host_without_a_cached_index(runtime: state.Runtime, tmp_path: Path) -> None:
+def test_session_start_skips_a_host_without_a_cached_index(runtime: state.Runtime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    #--- runners without sshfs add a missing-tools notice, which this test is not about ---
+    monkeypatch.setattr(platform, 'detect', lambda: {'ssh': True, 'sshfs': True, 'fuse': True, 'python': True})
     runtime.update_state(lambda saved: saved['hosts'].__setitem__('gpu-a', {'host': 'h', 'status': 'connected', 'mounted_mem': True}))
     assert start(tmp_path) is None
 

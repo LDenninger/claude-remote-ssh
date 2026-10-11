@@ -1,7 +1,0 @@
-[
-  {
-    "name": "inbox",
-    "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watch.py\"",
-    "description": "remote-ssh messages from other Claude Code sessions"
-  }
-]

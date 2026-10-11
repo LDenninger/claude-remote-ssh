@@ -14,6 +14,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 import tempfile
 from collections.abc import Callable, Iterator
@@ -25,6 +26,8 @@ from remote_ssh.ident import ClaudeProc, find_claude
 
 ALIAS_RE = r'^[a-z0-9-]{1,16}$'
 DEFAULT_STATE = {'hosts': {}, 'redirect': None, 'poll_interval_s': 2}
+#--- ssh binds `<ctl>.<16 random chars>` first: base + /<key 8>/<alias 16>/c + 17 must fit macOS's 103 ---
+MAX_BASE_LEN = 58
 
 
 class UnsafeDirError(Exception):
@@ -36,13 +39,48 @@ class UnsafeDirError(Exception):
 #---------------------------------------------------------------------
 
 def runtime_base() -> Path:
-    """Return the root of all runtime directories, `REMOTE_SSH_RUNTIME_BASE` if set."""
-    return Path(os.environ.get('REMOTE_SSH_RUNTIME_BASE') or f'/tmp/remote-ssh-{os.getuid()}')
+    """Return the root of all runtime directories of this user.
+
+    `REMOTE_SSH_RUNTIME_BASE` wins when set. Otherwise the base lives in a directory only this
+    user can write, so no other user can pre-create it: `$XDG_RUNTIME_DIR/remote-ssh`, or
+    `$TMPDIR/rssh` when `TMPDIR` is a macOS per-user `/var/folders/` directory. A missing or
+    too long candidate falls back to `/tmp/remote-ssh-<uid>`, so control socket paths stay
+    within the Unix socket limit. `scripts/gate.sh` computes the same base in shell.
+    """
+    override = os.environ.get('REMOTE_SSH_RUNTIME_BASE')
+    if override:
+        return Path(override)
+    xdg = os.environ.get('XDG_RUNTIME_DIR', '')
+    tmpdir = os.environ.get('TMPDIR', '')
+    base = ''
+    if xdg:
+        base = f'{xdg}/remote-ssh'
+    elif tmpdir.startswith('/var/folders/'):
+        base = f'{tmpdir[:-1] if tmpdir.endswith("/") else tmpdir}/rssh'
+    if not base or len(base) > MAX_BASE_LEN:
+        base = f'/tmp/remote-ssh-{os.getuid()}'
+    return Path(base)
 
 
 def msg_base() -> Path:
     """Return the root of the message store, `REMOTE_SSH_MSG_BASE` if set."""
     return Path(os.environ.get('REMOTE_SSH_MSG_BASE') or Path.home() / '.claude' / 'remote-ssh')
+
+
+def machine_id() -> str:
+    """Return the id of this machine, generated once and kept in `msg_base()/machine-id`.
+
+    Hostnames repeat across machines, so remote registrations name their relay machine by
+    this id instead.
+    """
+    id_path = ensure_private_dir(msg_base()) / 'machine-id'
+    try:
+        fd = os.open(id_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return id_path.read_text().strip()
+    with os.fdopen(fd, 'w') as id_file:
+        id_file.write(secrets.token_hex(8))
+    return id_path.read_text().strip()
 
 
 def iter_runtime_dirs() -> Iterator[Path]:
@@ -204,6 +242,15 @@ class Runtime:
         return self.dir / 'redirect-on'
 
     @property
+    def pending_path(self) -> Path:
+        """Path of the file that exists while this session's inbox holds unclaimed messages.
+
+        The server keeps it current on every poll. The message hook commands test for it in
+        shell and start Python only when it exists.
+        """
+        return self.dir / 'pending'
+
+    @property
     def context_dir(self) -> Path:
         """Directory of queued context blocks, one `<alias>.md` per host, created if missing."""
         return ensure_private_dir(self.dir / 'context')
@@ -243,10 +290,27 @@ class Runtime:
             owner.update(fields)
             write_json_atomic(self.owner_path, owner)
 
-    def load_state(self) -> dict:
-        """Return state.json merged over a copy of `DEFAULT_STATE`."""
+    def load_state(self, strict: bool = False) -> dict:
+        """Return state.json merged over a copy of `DEFAULT_STATE`.
+
+        Args:
+            strict: Raise on a state.json that exists but is not a JSON object, instead of
+                treating it as empty. Defaults to False.
+
+        Raises:
+            ValueError: With `strict`, state.json is not valid JSON or not an object.
+            OSError: With `strict`, state.json exists but cannot be read.
+        """
         state = copy.deepcopy(DEFAULT_STATE)
-        stored = read_json(self.state_path, {})
+        if strict:
+            try:
+                stored = json.loads(self.state_path.read_text())
+            except FileNotFoundError:
+                stored = {}
+            if not isinstance(stored, dict):
+                raise ValueError('state.json is not a JSON object')
+        else:
+            stored = read_json(self.state_path, {})
         if isinstance(stored, dict):
             state.update(stored)
         return state

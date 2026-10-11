@@ -19,6 +19,10 @@ All notable changes to this project are documented in this file. The format foll
   prompt or tool call after a background connect.
 - Messaging between Claude Code sessions on different machines through a plugin-owned inbox and
   outbox, delivered by a monitor and by hooks.
-- Per-project autoconnect through `.claude/remote-ssh.json`.
+- Per-project autoconnect through the personal `.claude/remote-ssh.local.json`. A committed
+  `.claude/remote-ssh.json` is ignored, with a note at session start.
 - Hook commands that test for pending work in shell and start Python only when there is some.
+- Redirect mode fails closed: a `Bash` call is denied while its host is not connected.
+- Relayed messages carry the host alias they were pulled from, and bodies are capped at 16 KB.
+- Remote memory follows Claude Code's per-repository memory directory, named after the git root.
 - Skills `remote`, `remote-connect` and `remote-status`.

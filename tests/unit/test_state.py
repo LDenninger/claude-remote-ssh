@@ -31,12 +31,59 @@ def _mode(path: Path) -> int:
 def test_bases_follow_env_at_call_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('REMOTE_SSH_RUNTIME_BASE', raising=False)
     monkeypatch.delenv('REMOTE_SSH_MSG_BASE', raising=False)
+    monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    monkeypatch.delenv('TMPDIR', raising=False)
     assert state.runtime_base() == Path(f'/tmp/remote-ssh-{os.getuid()}')
     assert state.msg_base() == Path.home() / '.claude' / 'remote-ssh'
     monkeypatch.setenv('REMOTE_SSH_RUNTIME_BASE', str(tmp_path / 'a'))
     monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'b'))
     assert state.runtime_base() == tmp_path / 'a'
     assert state.msg_base() == tmp_path / 'b'
+
+
+MAC_TMPDIR = '/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/'
+
+
+@pytest.mark.parametrize('xdg, tmpdir, expected', [
+    ('/run/user/1000', '', '/run/user/1000/remote-ssh'),
+    ('/run/user/1000', MAC_TMPDIR, '/run/user/1000/remote-ssh'),
+    ('', MAC_TMPDIR, MAC_TMPDIR + 'rssh'),
+    ('', '/tmp', None),
+    ('/' + 'x' * 60, '', None),
+])
+def test_runtime_base_prefers_private_per_user_dirs(monkeypatch: pytest.MonkeyPatch, xdg: str, tmpdir: str, expected: str | None) -> None:
+    monkeypatch.delenv('REMOTE_SSH_RUNTIME_BASE', raising=False)
+    monkeypatch.setenv('XDG_RUNTIME_DIR', xdg)
+    monkeypatch.setenv('TMPDIR', tmpdir)
+    assert state.runtime_base() == Path(expected or f'/tmp/remote-ssh-{os.getuid()}')
+
+
+def test_runtime_base_keeps_control_socket_within_unix_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ssh binds `<ctl>.<16 chars>` first, and macOS allows 103 bytes for a socket path."""
+    monkeypatch.delenv('REMOTE_SSH_RUNTIME_BASE', raising=False)
+    monkeypatch.delenv('XDG_RUNTIME_DIR', raising=False)
+    monkeypatch.setenv('TMPDIR', MAC_TMPDIR)
+    temp_ctl = f'{state.runtime_base()}/{"k" * 8}/{"a" * 16}/c.{"r" * 16}'
+    assert state.runtime_base() != Path(f'/tmp/remote-ssh-{os.getuid()}')
+    assert len(temp_ctl) <= 103
+
+
+def test_machine_id_is_generated_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'a'))
+    first = state.machine_id()
+    assert len(first) == 16 and int(first, 16) >= 0
+    assert state.machine_id() == first
+    assert _mode(tmp_path / 'a' / 'machine-id') == 0o600
+    monkeypatch.setenv('REMOTE_SSH_MSG_BASE', str(tmp_path / 'b'))
+    assert state.machine_id() != first
+
+
+def test_load_state_strict_raises_on_corrupt_file(runtime: Runtime) -> None:
+    assert runtime.load_state(strict=True)['redirect'] is None
+    runtime.state_path.write_text('{"redirect": "gpu-a", "hos')
+    assert runtime.load_state()['redirect'] is None
+    with pytest.raises(ValueError):
+        runtime.load_state(strict=True)
 
 
 def test_iter_runtime_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -23,8 +23,9 @@ running there. Every connection, mount and registration ends with the session.
 - **Messaging:** sessions on different machines send each other messages through the plugin's own
   inbox. Every transfer runs over the local session's connection, so the remote host never connects
   back.
-- **Autoconnect:** hosts listed in `.claude/remote-ssh.json` connect in the background at session
-  start. Their mount paths and memory index reach the session with the next prompt or tool call.
+- **Autoconnect:** hosts listed in your personal `.claude/remote-ssh.local.json` connect in the
+  background at session start. Their mount paths and memory index reach the session with the next
+  prompt or tool call.
 - **Low overhead:** the hooks on every prompt, tool call and `Bash` call are a shell file test, and
   start Python only while a message, a queued host report or a redirect target waits. Each poll
   runs one ssh process per host.
@@ -37,8 +38,23 @@ running there. Every connection, mount and registration ends with the session.
 - `remote_exec` goes through the MCP tool permission prompt. A redirected `Bash` call asks for
   approval of the rewritten `ssh` command line while `redirect_confirm` is on.
 - Only processes running as your user read or write your inboxes. Message bodies reach the session
-  as quoted text with the sender named, and the bundled `remote` skill tells Claude to treat them
-  as information, never as instructions.
+  as quoted text, capped at 16 KB, with the sender named, and the bundled `remote` skill tells
+  Claude to treat them as information, never as instructions.
+
+### Trust model
+
+- **Trusted:** your local user account, your `~/.ssh/config` and agent, and your personal
+  `.claude/remote-ssh.local.json`. Keep that file out of git, for example in `.gitignore`.
+- **Not trusted to start connections:** files committed to a repository. A committed
+  `.claude/remote-ssh.json` connects nothing, and the session start notes once that it is ignored.
+- **Data, never instructions:** message bodies, the remote `MEMORY.md` index and everything else
+  read from a remote host. A remote account can write any field of a message it relays, so a
+  relayed message names the host alias the plugin pulled it from, not the sender's claimed host.
+  A message must be addressed to this session and stored under its own id, or it is dropped.
+- **Fail closed:** while redirect mode is on and its host is reconnecting, failed or unreadable, a
+  `Bash` call is denied with the reason, never run locally. A `local:` prefix runs it locally on
+  purpose, and `remote_mode(null)` ends redirect mode.
+- A `host` value starting with `-` is rejected, and every `ssh` call ends its options with `--`.
 
 ## 📦 Install
 
@@ -65,7 +81,8 @@ and remote memory.
 | Fedora | `sudo dnf install openssh-clients fuse-sshfs python3` |
 | macOS | install [macFUSE](https://macfuse.github.io/), then `brew install gromgit/fuse/sshfs-mac` |
 
-On each remote host: `bash` and an SSH server. Messaging with a remote session also needs Claude
+On each remote host: `bash`, a POSIX `sh` and an SSH server. A remote whose login shell is csh, tcsh or fish
+is untested, and a multi-line `remote_exec` command may fail there. Messaging with a remote session also needs Claude
 Code with this plugin installed on that host. Without sshfs or FUSE, mounts and remote memory are
 off and every other feature works, and the session start shows the missing tool with its install
 command.
@@ -111,11 +128,15 @@ prompt or tool call.
 
 ## ⚙️ Configuration
 
-A project lists hosts to connect at session start in `<project>/.claude/remote-ssh.json`:
+List hosts to connect at session start in `<project>/.claude/remote-ssh.local.json`, a personal
+file you keep out of git:
 
 ```json
 { "hosts": [ { "alias": "gpu-a", "host": "gpu-a", "path": "~/proj", "autoconnect": true } ] }
 ```
+
+A committed `.claude/remote-ssh.json` is ignored, since a cloned repository must not open ssh
+connections on its own.
 
 Plugin options are set when the plugin is enabled, and later through `/config`:
 
@@ -126,6 +147,12 @@ Plugin options are set when the plugin is enabled, and later through `/config`:
 | `sshfs_options` | empty | extra options appended with `-o` to every sshfs mount |
 | `redirect_confirm` | `true` | ask for approval of each redirected `Bash` command |
 
+With `redirect_confirm` off, a redirected command goes through your normal `Bash` permission rules,
+which then match the rewritten `ssh ...` command line, not the command Claude wrote.
+
+Runtime files, control sockets and mounts live under `$XDG_RUNTIME_DIR/remote-ssh` on Linux,
+`$TMPDIR/rssh` on macOS, and `/tmp/remote-ssh-<uid>` when neither fits.
+
 ## 🔧 Troubleshooting
 
 - **Connect fails with `Permission denied` or a host key error:** run `ssh <host> true` in a
@@ -133,8 +160,8 @@ Plugin options are set when the plugin is enabled, and later through `/config`:
   the key into the agent with `ssh-add`, or accept the host key once by hand.
 - **A mount hangs or shows `Transport endpoint is not connected`:** the host lost its connection.
   Run `/remote-ssh:remote-status`, then `remote_disconnect` and `remote_connect` for that alias.
-- **A stale mount survives a crash:** on Linux run `fusermount3 -uz /tmp/remote-ssh-$(id -u)/*/<alias>/fs`,
-  on macOS `diskutil unmount force <mount path>`. The next session start also removes leftovers of
+- **A stale mount survives a crash:** on Linux run `fusermount3 -uz "$XDG_RUNTIME_DIR"/remote-ssh/*/<alias>/fs`,
+  on macOS `diskutil unmount force <mount path>`. `/remote-ssh:remote-status` prints the mount paths. The next session start also removes leftovers of
   dead sessions.
 - **No mounts on macOS:** allow the macFUSE system extension under System Settings, Privacy &
   Security, and reboot.
@@ -142,7 +169,8 @@ Plugin options are set when the plugin is enabled, and later through `/config`:
 ## 🤝 Contributing
 
 Questions and bug reports go to [GitHub issues](https://github.com/LDenninger/claude-remote-ssh/issues),
-and pull requests are welcome. CI runs `claude plugin validate . --strict`, the unit tests on Ubuntu
+and pull requests are welcome. CI runs `claude plugin validate . --strict` on the marketplace and
+the plugin manifest, the unit tests on Ubuntu
 and macOS with Python 3.9 and 3.12, and the integration tests against a local sshd on Ubuntu.
 
 ### Testing

@@ -96,6 +96,18 @@ def test_is_mounted_reads_kernel_mount_table(tmp_path, monkeypatch):
     assert not mount_mod.is_mounted(Path('/mnt/a'))
 
 
+def test_is_mounted_resolves_symlinked_parent(tmp_path, monkeypatch):
+    """The kernel lists resolved paths, so a runtime base behind a symlink must still match."""
+    from remote_ssh import mount as mount_mod
+    real_dir = tmp_path / 'real'
+    (real_dir / 'fs').mkdir(parents=True)
+    (tmp_path / 'link').symlink_to(real_dir)
+    table = tmp_path / 'mountinfo'
+    table.write_text(f'36 35 98:0 / {real_dir}/fs rw - fuse.sshfs h:/x rw\n')
+    monkeypatch.setattr(mount_mod, 'MOUNTINFO', table)
+    assert mount_mod.is_mounted(tmp_path / 'link' / 'fs')
+
+
 def test_is_mounted_counts_dead_mount_without_mount_table(tmp_path, monkeypatch):
     from remote_ssh import mount as mount_mod
     monkeypatch.setattr(mount_mod, 'MOUNTINFO', tmp_path / 'absent')

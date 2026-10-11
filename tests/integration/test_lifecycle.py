@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from conftest import ROOT, Mcp, base_env, is_running, pids_matching, release_leftovers, runtime_dir_of, start_session_hook, wait_for
+from conftest import ROOT, Mcp, base_env, descendants, is_running, pids_matching, release_leftovers, run_hook, runtime_dir_of, start_session_hook, wait_for
 
 from remote_ssh import mount, state
 
@@ -167,9 +167,51 @@ def test_i3_master_killed_reconnects_and_remounts(session: Any, sshd: dict, remo
     assert not is_error and 'after' in text
 
 
+def test_remote_exec_timeout_leaves_no_remote_process(session: Any, sshd: dict, remote_dir: Path) -> None:
+    sess = session('a')
+    text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
+    assert not is_error, text
+    marker = f'sleep 7{os.getpid() % 1000:03d}'
+    started = time.monotonic()
+    text, is_error = sess.mcp.call('remote_exec', alias='h1', command=f'{marker}; echo done', timeout_s=2)
+    assert is_error and text.startswith('exit 124 on h1'), text
+    assert time.monotonic() - started < 15
+    assert wait_for(lambda: not pids_matching(marker), 5), f'{marker} still runs on the remote'
+
+
 #---------------------------------------------------------------------
 # I4
 #---------------------------------------------------------------------
+
+def test_session_end_with_frozen_host_releases_everything_within_10s(session: Any, sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
+    """The remote stops answering: the sshd processes of this session's connection are SIGSTOPped."""
+    sess = session('a')
+    text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(remote_dir))
+    assert not is_error, text
+    remote_reg = tmp_path / 'remote-msg' / 'sessions' / f'{sess.sid}.json'
+    assert remote_reg.exists()
+    frozen = descendants(sshd['pid'])
+    assert frozen, 'no sshd session process found'
+    for pid in frozen:
+        os.kill(pid, signal.SIGSTOP)
+    try:
+        started = time.monotonic()
+        run_hook(sess.env, 'SessionEnd', {'session_id': sess.sid, 'reason': 'other'})
+        elapsed = time.monotonic() - started
+        print(f'\nSessionEnd with a frozen host took {elapsed:.2f} s')
+        assert elapsed < TEARDOWN_LIMIT_S
+        assert_released(sess.rt, 'h1')
+        assert state.read_json(sess.rt / 'state.json')['hosts'] == {}
+        assert sess.mcp.proc.poll() is None, 'SessionEnd must not end the server process'
+    finally:
+        for pid in frozen:
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+    text, _ = sess.mcp.call('remote_status')
+    assert text.startswith('no hosts connected'), text
+
 
 def test_i4_sigkill_of_parent_claude_tears_down_within_10s(sshd: dict, remote_dir: Path, tmp_path: Path) -> None:
     """The stand-in Claude is the server's parent shell, as Claude is for a real server."""

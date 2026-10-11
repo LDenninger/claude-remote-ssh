@@ -6,7 +6,9 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,9 +47,44 @@ def test_pre_tool_use_without_redirect_has_no_output(runtime: state.Runtime) -> 
     assert hooks.dispatch('PreToolUse', BASH_INPUT) is None
 
 
-def test_pre_tool_use_with_disconnected_target_has_no_output(runtime: state.Runtime) -> None:
-    set_redirect(runtime, status='reconnecting')
+def assert_denied(output: dict | None, *words: str) -> None:
+    """Assert that a PreToolUse output denies the call, naming the `local:` escape and `words`."""
+    specific = output['hookSpecificOutput']
+    assert specific['permissionDecision'] == 'deny'
+    assert 'updatedInput' not in specific
+    for word in ('local:', 'remote_mode(null)', *words):
+        assert word in specific['permissionDecisionReason']
+
+
+@pytest.mark.parametrize('status', ['reconnecting', 'failed', 'connecting'])
+def test_pre_tool_use_with_disconnected_target_denies(runtime: state.Runtime, status: str) -> None:
+    set_redirect(runtime, status=status)
+    assert_denied(hooks.dispatch('PreToolUse', BASH_INPUT), 'gpu-a', status)
+
+
+def test_pre_tool_use_with_unknown_target_denies(runtime: state.Runtime) -> None:
+    runtime.update_state(lambda saved: saved.update(redirect='gpu-z'))
+    assert_denied(hooks.dispatch('PreToolUse', BASH_INPUT), 'gpu-z', 'not connected')
+
+
+def test_pre_tool_use_with_unreadable_state_denies_only_while_flag_exists(runtime: state.Runtime) -> None:
+    set_redirect(runtime)
+    runtime.state_path.write_text('{"redirect": "gpu-a", "ho')
+    assert_denied(hooks.dispatch('PreToolUse', BASH_INPUT), 'unreadable')
+    runtime.redirect_flag_path.unlink()
     assert hooks.dispatch('PreToolUse', BASH_INPUT) is None
+
+
+def test_pre_tool_use_local_prefix_runs_locally_while_target_is_down(runtime: state.Runtime) -> None:
+    set_redirect(runtime, status='reconnecting')
+    payload = {'tool_name': 'Bash', 'tool_input': {'command': 'local: git status'}}
+    assert hooks.dispatch('PreToolUse', payload)['hookSpecificOutput']['updatedInput'] == {'command': 'git status'}
+
+
+def test_pre_tool_use_error_while_building_denies(runtime: state.Runtime, monkeypatch: pytest.MonkeyPatch) -> None:
+    set_redirect(runtime)
+    monkeypatch.setattr('remote_ssh.conn.exec_argv', lambda *args, **kwargs: 1 / 0)
+    assert_denied(hooks.dispatch('PreToolUse', BASH_INPUT), 'gpu-a')
 
 
 def test_pre_tool_use_ignores_other_tools(runtime: state.Runtime) -> None:
@@ -67,7 +104,7 @@ def test_pre_tool_use_redirect_rewrites_and_asks(runtime: state.Runtime) -> None
     argv = shlex.split(updated['command'])
     assert argv[:3] == ['ssh', '-S', str(runtime.ctl_path('gpu-a'))]
     assert 'user@gpu' in argv
-    assert 'cd /srv/proj && ls -la' in argv[-1]
+    assert 'cd -- /srv/proj && ls -la' in argv[-1]
 
 
 @pytest.mark.parametrize('value', ['false', 'False', '0'])
@@ -115,7 +152,7 @@ def test_session_start_writes_owner_and_autoconnect(runtime: state.Runtime, tmp_
         {'alias': 'gpu-a', 'host': 'gpu-a', 'path': '~/proj', 'autoconnect': True},
         {'alias': 'gpu-b', 'host': 'gpu-b', 'path': '~/proj', 'autoconnect': False},
     ]
-    (project_dir / '.claude' / 'remote-ssh.json').write_text(json.dumps({'hosts': hosts}))
+    (project_dir / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
     output = hooks.dispatch('SessionStart', {'session_id': 'abcd1234-ef', 'cwd': str(project_dir), 'source': 'startup'})
 
     owner = runtime.owner()
@@ -134,6 +171,44 @@ def test_session_start_without_config_writes_empty_autoconnect(runtime: state.Ru
     assert state.read_json(runtime.dir / 'autoconnect.json') == []
 
 
+def test_session_start_ignores_committed_config_with_note_once_per_session(runtime: state.Runtime, tmp_path: Path) -> None:
+    (tmp_path / '.claude').mkdir()
+    hosts = [{'alias': 'evil', 'host': 'attacker.example', 'path': '~', 'autoconnect': True}]
+    (tmp_path / '.claude' / 'remote-ssh.json').write_text(json.dumps({'hosts': hosts}))
+    output = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'startup'})
+    assert state.read_json(runtime.dir / 'autoconnect.json') == []
+    context = output['hookSpecificOutput']['additionalContext']
+    assert 'remote-ssh.json is ignored' in context and 'remote-ssh.local.json' in context
+    assert 'evil' not in context
+    again = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'compact'})
+    assert again is None or 'ignored' not in again.get('hookSpecificOutput', {}).get('additionalContext', '')
+    after_clear = hooks.dispatch('SessionStart', {'session_id': 'sid-0002', 'cwd': str(tmp_path), 'source': 'clear'})
+    assert 'remote-ssh.json is ignored' in after_clear['hookSpecificOutput']['additionalContext']
+
+
+def test_session_start_announces_autoconnect_only_before_the_server_read_it(runtime: state.Runtime, tmp_path: Path) -> None:
+    (tmp_path / '.claude').mkdir()
+    hosts = [{'alias': 'gpu-a', 'host': 'gpu-a', 'autoconnect': True}]
+    (tmp_path / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
+    output = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'startup'})
+    assert 'connecting gpu-a' in output['hookSpecificOutput']['additionalContext']
+    runtime.update_owner(autoconnect_read=True)
+    for source in ('clear', 'compact', 'resume'):
+        output = hooks.dispatch('SessionStart', {'session_id': 'sid-0002', 'cwd': str(tmp_path), 'source': source})
+        assert output is None or 'connecting' not in json.dumps(output)
+
+
+def test_missing_tools_message_at_most_once_per_day(runtime: state.Runtime, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr('remote_ssh.platform.detect', lambda: {'ssh': True, 'sshfs': False, 'fuse': True, 'python': True})
+    first = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path)})
+    assert 'sshfs is missing' in first['systemMessage']
+    second = hooks.dispatch('SessionStart', {'session_id': 'sid-0002', 'cwd': str(tmp_path)})
+    assert second is None or 'systemMessage' not in second
+    stamp_path = state.msg_base() / 'missing-tools-shown'
+    os.utime(stamp_path, (0, 0))
+    assert 'sshfs is missing' in hooks.dispatch('SessionStart', {'session_id': 'sid-0003', 'cwd': str(tmp_path)})['systemMessage']
+
+
 #---------------------------------------------------------------------
 # UserPromptSubmit and PostToolUse
 #---------------------------------------------------------------------
@@ -150,6 +225,13 @@ def test_user_prompt_submit_injects_message_once(runtime: state.Runtime) -> None
 
 def test_post_tool_use_without_messages_has_no_output(runtime: state.Runtime) -> None:
     assert hooks.dispatch('PostToolUse', {'session_id': 'recv-0001', 'tool_name': 'Bash'}) is None
+
+
+def test_message_hook_clears_pending_flag_once_inbox_is_empty(runtime: state.Runtime) -> None:
+    relay.Store().deliver(relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'results are ready'))
+    runtime.pending_path.touch()
+    assert 'results are ready' in hooks.dispatch('PostToolUse', {'session_id': 'recv-0001'})['hookSpecificOutput']['additionalContext']
+    assert not runtime.pending_path.exists()
 
 
 def test_post_tool_use_injects_queued_context_once_with_messages(runtime: state.Runtime) -> None:
@@ -172,6 +254,7 @@ def fake_root(tmp_path: Path) -> Path:
     """Return a plugin root whose hook.py only reports that Python ran, and for which event."""
     (tmp_path / 'plugin' / 'scripts').mkdir(parents=True)
     (tmp_path / 'plugin' / 'scripts' / 'hook.py').write_text('import sys\nsys.stdin.read()\nprint("python", sys.argv[1])\n')
+    shutil.copy(ROOT / 'scripts' / 'gate.sh', tmp_path / 'plugin' / 'scripts' / 'gate.sh')
     return tmp_path / 'plugin'
 
 
@@ -194,18 +277,17 @@ def run_hook_command(event: str, fake_root: Path, env: dict[str, str]) -> subpro
 @pytest.mark.parametrize('event', ['UserPromptSubmit', 'PostToolUse'])
 def test_message_hooks_start_python_only_for_waiting_work(runtime: state.Runtime, fake_root: Path, event: str) -> None:
     env = dict(os.environ)
-    assert run_hook_command(event, fake_root, env).stdout == ''
-
-    #--- a delivered (read/) message is no work ---
-    msg = relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'hi')
-    relay.Store().deliver(msg)
-    relay.Store().claim('recv-0001', msg['id'])
     result = run_hook_command(event, fake_root, env)
     assert (result.returncode, result.stdout, result.stderr) == (0, '', '')
 
-    relay.Store().deliver(relay.new_message('sender-0001', 'other-send', 'gpu-a', 'recv-0001', 'hi again'))
+    #--- an undelivered message of another session is not this runtime's work ---
+    relay.Store().deliver(relay.new_message('sender-0001', 'other-send', 'gpu-a', 'other-0001', 'not for you'))
+    assert run_hook_command(event, fake_root, env).stdout == ''
+
+    #--- the server flags this session's pending messages ---
+    runtime.pending_path.touch()
     assert run_hook_command(event, fake_root, env).stdout == f'python {event}\n'
-    relay.Store().claim('recv-0001', relay.Store().pending('recv-0001')[0]['id'])
+    runtime.pending_path.unlink()
     assert run_hook_command(event, fake_root, env).stdout == ''
 
     runtime.queue_context('gpu-a', 'block')
@@ -221,15 +303,53 @@ def test_pre_tool_use_hook_starts_python_only_while_redirect_is_set(runtime: sta
     assert run_hook_command('PreToolUse', fake_root, env).stdout == ''
 
 
-def test_default_bases_in_hook_commands_match_python(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The shell defaults glob /tmp/remote-ssh-* and expand $HOME like `state` does."""
+MAC_TMPDIR = '/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/'
+
+
+@pytest.mark.parametrize('env', [
+    {'REMOTE_SSH_RUNTIME_BASE': '/some/override', 'XDG_RUNTIME_DIR': '/run/user/1'},
+    {'XDG_RUNTIME_DIR': '/run/user/1000'},
+    {'XDG_RUNTIME_DIR': '/run/user/1000', 'TMPDIR': MAC_TMPDIR},
+    {'TMPDIR': MAC_TMPDIR},
+    {'TMPDIR': MAC_TMPDIR.rstrip('/')},
+    {'TMPDIR': '/tmp'},
+    {'XDG_RUNTIME_DIR': '/' + 'x' * 60},
+    {},
+])
+def test_shell_runtime_base_matches_python(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """scripts/gate.sh, which every hooks.json command sources, computes `state.runtime_base()`."""
+    for name in ('REMOTE_SSH_RUNTIME_BASE', 'XDG_RUNTIME_DIR', 'TMPDIR'):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    shell_env = {key: value for key, value in os.environ.items()}
+    result = subprocess.run(['sh', '-c', f'e=base r={shlex.quote(str(ROOT))}; . "$r/scripts/gate.sh"'], env=shell_env,
+                            capture_output=True, text=True, timeout=10)
+    assert Path(result.stdout.strip()) == state.runtime_base()
+
+
+@pytest.fixture
+def short_dir() -> Path:
+    """Return a fresh directory with a path short enough to hold a runtime base, removed afterwards."""
+    path = Path(tempfile.mkdtemp(prefix='rs-', dir='/tmp'))
+    yield path
+    shutil.rmtree(path)
+
+
+def test_hook_commands_find_work_in_python_runtime_base(short_dir: Path, fake_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without an override the hooks.json commands look in the base Python writes to, and only there."""
     monkeypatch.delenv('REMOTE_SSH_RUNTIME_BASE', raising=False)
-    monkeypatch.delenv('REMOTE_SSH_MSG_BASE', raising=False)
-    commands = (ROOT / 'hooks' / 'hooks.json').read_text()
-    assert str(state.runtime_base()).startswith('/tmp/remote-ssh-')
-    assert '${REMOTE_SSH_RUNTIME_BASE:-/tmp/remote-ssh-*}' in commands
-    assert state.msg_base() == Path.home() / '.claude' / 'remote-ssh'
-    assert '${REMOTE_SSH_MSG_BASE:-$HOME/.claude/remote-ssh}' in commands
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(short_dir / 'xdg'))
+    monkeypatch.setenv('REMOTE_SSH_CLAUDE_PID', str(os.getpid()))
+    assert state.runtime_base() == short_dir / 'xdg' / 'remote-ssh'
+    runtime = state.Runtime.current()
+    env = dict(os.environ)
+    assert run_hook_command('PreToolUse', fake_root, env).stdout == ''
+    runtime.update_state(lambda saved: saved.update(redirect='gpu-a'))
+    assert run_hook_command('PreToolUse', fake_root, env).stdout == 'python PreToolUse\n'
+    runtime.pending_path.touch()
+    assert run_hook_command('PostToolUse', fake_root, env).stdout == 'python PostToolUse\n'
+    assert run_hook_command('PostToolUse', fake_root, {**env, 'XDG_RUNTIME_DIR': str(short_dir / 'other')}).stdout == ''
 
 
 #---------------------------------------------------------------------
@@ -242,8 +362,15 @@ def test_main_prints_json_and_tolerates_bad_input(runtime: state.Runtime, monkey
     hooks.main('PreToolUse')
     assert json.loads(capsys.readouterr().out)['hookSpecificOutput']['permissionDecision'] == 'ask'
 
+    #--- Python runs for PreToolUse only while a redirect flag exists, so an error fails closed ---
     monkeypatch.setattr('sys.stdin', io.StringIO('{not json'))
     hooks.main('PreToolUse')
+    captured = capsys.readouterr()
+    assert_denied(json.loads(captured.out), 'hook failed')
+    assert 'remote-ssh hook' in captured.err
+
+    monkeypatch.setattr('sys.stdin', io.StringIO('{not json'))
+    hooks.main('PostToolUse')
     captured = capsys.readouterr()
     assert captured.out == ''
     assert 'remote-ssh hook' in captured.err

@@ -67,7 +67,7 @@ def sshd(tmp_path_factory: pytest.TempPathFactory) -> Any:
     else:
         proc.kill()
         pytest.fail('sshd did not come up: ' + (sshd_dir / 'sshd.log').read_text())
-    yield {'host': '127.0.0.1', 'opts': opts, 'dir': sshd_dir}
+    yield {'host': '127.0.0.1', 'opts': opts, 'dir': sshd_dir, 'pid': proc.pid}
     proc.terminate()
     proc.wait(5)
 
@@ -186,6 +186,24 @@ def is_running(pid: int) -> bool:
     except OSError:
         return False
     return stat_text[stat_text.rfind(')') + 2] != 'Z'
+
+
+def descendants(pid: int) -> list[int]:
+    """Return the pids of every descendant of `pid`, read from /proc."""
+    children: dict[int, list[int]] = {}
+    for stat_path in Path('/proc').glob('[0-9]*/stat'):
+        try:
+            stat_text = stat_path.read_text()
+        except OSError:
+            continue
+        ppid = int(stat_text[stat_text.rfind(')') + 2:].split()[1])
+        children.setdefault(ppid, []).append(int(stat_path.parent.name))
+    found, todo = [], list(children.get(pid, []))
+    while todo:
+        child = todo.pop()
+        found.append(child)
+        todo.extend(children.get(child, []))
+    return found
 
 
 def runtime_dir_of(rt_root: Path, claude_pid: int) -> Path:

@@ -52,8 +52,10 @@ jobs:
           node-version: "22"
       - name: Install Claude Code
         run: npm i -g @anthropic-ai/claude-code
-      - name: Validate plugin
+      - name: Validate marketplace
         run: claude plugin validate . --strict
+      - name: Validate plugin manifest
+        run: claude plugin validate .claude-plugin/plugin.json --strict
 
   # The Python, OpenSSH and sshfs each supported Ubuntu LTS ships, not versions picked by setup-python.
   ubuntu:

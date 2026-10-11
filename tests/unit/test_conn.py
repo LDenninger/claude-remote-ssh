@@ -5,11 +5,12 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
-from remote_ssh.conn import TRUNCATE, ConnectError, Master, exec_argv, remote_shell, tail
+from remote_ssh.conn import TRUNCATE, ConnectError, Master, exec_argv, expand_remote_path, remote_shell, tail, with_remote_timeout
 
 TRICKY = [
     'echo plain',
@@ -51,8 +52,59 @@ def test_remote_shell_cwd_failure_skips_command(tmp_path: Path) -> None:
 
 def test_exec_argv_layout() -> None:
     argv = exec_argv(Path('/run/c'), 'gpu', 'ls', '/srv', extra=['-p', '2222'])
-    assert argv == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-p', '2222', '-T', 'gpu', '--', remote_shell('ls', '/srv')]
-    assert exec_argv(Path('/run/c'), 'gpu', 'ls', None)[:6] == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-T']
+    assert argv == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-p', '2222', '-T', '--', 'gpu', remote_shell('ls', '/srv')]
+    assert exec_argv(Path('/run/c'), 'gpu', 'ls', None)[:7] == ['ssh', '-S', '/run/c', '-o', 'BatchMode=yes', '-T', '--']
+
+
+def test_master_argv_end_options_before_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, b'', b''))
+    ctl = tmp_path / 'c'
+    ctl.touch()  # an existing control path, so check and stop reach ssh
+    master = Master('a', 'gpu', ctl)
+    master.run('true')
+    master.check()
+    master.stop()
+    assert len(calls) == 3
+    for argv in calls:
+        assert argv[argv.index('gpu') - 1] == '--', argv
+
+
+def test_expand_remote_path() -> None:
+    assert expand_remote_path('~') == '.'
+    assert expand_remote_path('~/my proj') == "'my proj'"
+    assert expand_remote_path('/srv/x') == '/srv/x'
+
+
+def test_remote_shell_resolves_tilde_cwd_against_home(tmp_path: Path) -> None:
+    (tmp_path / 'my sub').mkdir()
+    assert run_locally(remote_shell('pwd', '~/my sub'), tmp_path).strip() == str(tmp_path / 'my sub')
+    assert run_locally(remote_shell('pwd', '~'), tmp_path).strip() == str(tmp_path)
+
+
+def test_plumbing_shell_skips_login_profile(tmp_path: Path) -> None:
+    (tmp_path / '.bash_profile').write_text('echo PROFILE-SOURCED\n')
+    assert 'PROFILE-SOURCED' in run_locally(remote_shell('true', None), tmp_path)
+    assert run_locally(remote_shell('echo plain', None, login=False), tmp_path) == 'plain\n'
+    assert exec_argv(Path('/run/c'), 'gpu', 'true', None, login=False)[-1].startswith('sh -c ')
+
+
+def test_run_defaults_to_plain_shell_and_exec_to_login_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: calls.append(argv) or subprocess.CompletedProcess(argv, 0, b'', b''))
+    master = Master('a', 'gpu', Path('/run/c'))
+    master.run('true')
+    master.exec('true', timeout=7)
+    assert calls[0][-1].startswith('sh -c ')
+    assert 'bash -lc' in calls[1][-1] and 'timeout -k' in calls[1][-1] and ' 7 ' in calls[1][-1]
+
+
+def test_remote_timeout_ends_the_command(tmp_path: Path) -> None:
+    started = time.monotonic()
+    remote = with_remote_timeout(remote_shell('sleep 30', None), 1)
+    result = subprocess.run(['bash', '-c', remote], capture_output=True, env={'PATH': os.environ['PATH'], 'HOME': str(tmp_path)}, timeout=20)
+    assert result.returncode == 124
+    assert time.monotonic() - started < 10
 
 
 def test_tail() -> None:

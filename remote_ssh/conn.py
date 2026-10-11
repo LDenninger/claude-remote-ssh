@@ -3,7 +3,8 @@
 A `Master` owns one multiplexed ssh connection per host alias. Every later command, sshfs mount
 and relay round trip reuses its control socket instead of authenticating again. `exec_argv` builds
 the argv for one command over that socket, and `remote_shell` quotes the command so that the remote
-login shell runs it unchanged.
+shell runs it unchanged. User commands run in a `bash -l` login shell, plugin plumbing in plain
+`sh`, so polling never sources the user's login profile.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import time
 from pathlib import Path
 
 TRUNCATE = 30_000
+KILL_AFTER_S = 5
+EXEC_GRACE_S = 15
 
 
 class ConnectError(Exception):
@@ -26,21 +29,53 @@ class ConnectError(Exception):
 # Command construction
 #---------------------------------------------------------------------
 
-def remote_shell(command: str, cwd: str | None) -> str:
-    """Wrap a command for the remote login shell.
+def expand_remote_path(path: str) -> str:
+    """Return a shell word that `cd` resolves relative to the remote home.
+
+    Args:
+        path: Requested remote path. `~` and `~/x` become `.` and `x`, for a shell that has
+            changed into the remote home first. Anything else is quoted unchanged.
+    """
+    if path in ('~', '~/'):
+        return '.'
+    if path.startswith('~/'):
+        return shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def remote_shell(command: str, cwd: str | None, login: bool = True) -> str:
+    """Wrap a command for the remote shell.
 
     Args:
         command: Shell command to run remotely, passed through verbatim.
-        cwd: Remote directory to change into first. None runs in the login directory.
+        cwd: Remote directory to change into first, `~`-relative paths resolved against the
+            remote home. None runs in the login directory.
+        login: Run under `bash -lc`, sourcing the login profile, else under plain `sh -c`.
+            Defaults to True.
 
     Returns:
-        A single string for ssh's remote command that runs `command` under `bash -lc`.
+        A single string for ssh's remote command.
     """
-    script = f'cd {shlex.quote(cwd)} && {command}' if cwd else command
-    return f'bash -lc {shlex.quote(script)}'
+    if cwd and (cwd == '~' or cwd.startswith('~/')):
+        command = f'cd ~ && cd -- {expand_remote_path(cwd)} && {command}'
+    elif cwd:
+        command = f'cd -- {shlex.quote(cwd)} && {command}'
+    return f'{"bash -lc" if login else "sh -c"} {shlex.quote(command)}'
 
 
-def exec_argv(ctl: Path, host: str, command: str, cwd: str | None, extra: list[str] | None = None) -> list[str]:
+def with_remote_timeout(remote: str, seconds: int) -> str:
+    """Wrap a remote command line so the remote `timeout` ends it after `seconds`.
+
+    Killing the local ssh client leaves the remote command running, so the limit is enforced
+    on the remote. GNU `timeout` signals the command's whole process group, and `KILL_AFTER_S`
+    later sends SIGKILL. A remote without `timeout` runs the command unlimited.
+    """
+    inner = 'if command -v timeout >/dev/null 2>&1; then exec timeout -k ' + str(KILL_AFTER_S) + ' "$0" sh -c "$1"; fi; exec sh -c "$1"'
+    return f'sh -c {shlex.quote(inner)} {int(seconds)} {shlex.quote(remote)}'
+
+
+def exec_argv(ctl: Path, host: str, command: str, cwd: str | None, extra: list[str] | None = None,
+              login: bool = True, remote_timeout: int | None = None) -> list[str]:
     """Build the local argv that runs one command over an existing control socket.
 
     Args:
@@ -49,11 +84,16 @@ def exec_argv(ctl: Path, host: str, command: str, cwd: str | None, extra: list[s
         command: Shell command to run remotely.
         cwd: Remote working directory, or None for the login directory.
         extra: Additional ssh options inserted before `-T`. Defaults to none.
+        login: Run in a `bash -l` login shell, else in plain `sh`. Defaults to True.
+        remote_timeout: Seconds after which the remote ends the command. Defaults to no limit.
 
     Returns:
         The ssh argv, ready for `subprocess.run` or `shlex.join`.
     """
-    return ['ssh', '-S', str(ctl), '-o', 'BatchMode=yes', *(extra or []), '-T', host, '--', remote_shell(command, cwd)]
+    remote = remote_shell(command, cwd, login)
+    if remote_timeout:
+        remote = with_remote_timeout(remote, remote_timeout)
+    return ['ssh', '-S', str(ctl), '-o', 'BatchMode=yes', *(extra or []), '-T', '--', host, remote]
 
 
 def tail(s: str, n: int = TRUNCATE) -> str:
@@ -115,7 +155,7 @@ class Master:
         argv = [
             'ssh', '-M', '-N', '-S', str(self.ctl),
             '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', '-o', 'ControlPersist=no',
-            *self.extra, self.host,
+            *self.extra, '--', self.host,
         ]
         with tempfile.TemporaryFile() as err_file:
             self._proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err_file)
@@ -135,7 +175,7 @@ class Master:
         """Return whether the control socket answers `ssh -O check`."""
         if not self.ctl.exists():
             return False
-        argv = ['ssh', '-S', str(self.ctl), *self.extra, '-O', 'check', self.host]
+        argv = ['ssh', '-S', str(self.ctl), *self.extra, '-O', 'check', '--', self.host]
         try:
             result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
@@ -160,7 +200,7 @@ class Master:
         """Close the master, kill its process if needed and remove the socket. Never raises."""
         try:
             if self.ctl.exists():
-                subprocess.run(['ssh', '-S', str(self.ctl), *self.extra, '-O', 'exit', self.host],
+                subprocess.run(['ssh', '-S', str(self.ctl), *self.extra, '-O', 'exit', '--', self.host],
                                stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
         except (OSError, subprocess.TimeoutExpired):
             pass
@@ -180,8 +220,8 @@ class Master:
     # Commands
     #---------------------------------------------------------------------
 
-    def run(self, command: str, cwd: str | None = None, input: bytes | None = None,
-            timeout: float | None = 60) -> subprocess.CompletedProcess:
+    def run(self, command: str, cwd: str | None = None, input: bytes | None = None, timeout: float | None = 60,
+            login: bool = False, remote_timeout: int | None = None) -> subprocess.CompletedProcess:
         """Run a remote command over the master and capture raw output.
 
         Args:
@@ -189,6 +229,8 @@ class Master:
             cwd: Remote working directory. Defaults to the login directory.
             input: Bytes fed to the remote stdin. Defaults to an empty stdin.
             timeout: Seconds before `subprocess.TimeoutExpired`. Defaults to 60, None waits forever.
+            login: Run in a `bash -l` login shell. Defaults to False, plain `sh` for plumbing.
+            remote_timeout: Seconds after which the remote ends the command. Defaults to no limit.
 
         Returns:
             The completed process with bytes stdout and stderr.
@@ -196,18 +238,19 @@ class Master:
         Raises:
             subprocess.TimeoutExpired: The command outlived `timeout`.
         """
-        argv = exec_argv(self.ctl, self.host, command, cwd, extra=self.extra)
+        argv = exec_argv(self.ctl, self.host, command, cwd, extra=self.extra, login=login, remote_timeout=remote_timeout)
         #--- never inherit our stdin: for the MCP server it is the JSON-RPC pipe ---
         stdin = None if input is not None else subprocess.DEVNULL
         return subprocess.run(argv, input=input, stdin=stdin, capture_output=True, timeout=timeout)
 
-    def exec(self, command: str, cwd: str | None = None, timeout: float = 600) -> tuple[str, str, int]:
-        """Run a remote command and return decoded, truncated output.
+    def exec(self, command: str, cwd: str | None = None, timeout: int = 600) -> tuple[str, str, int]:
+        """Run a remote command in a login shell and return decoded, truncated output.
 
         Args:
             command: Shell command to run remotely.
             cwd: Remote working directory. Defaults to the login directory.
-            timeout: Seconds before the command is abandoned. Defaults to 600.
+            timeout: Seconds before the remote ends the command. The local ssh gets
+                `EXEC_GRACE_S` more before it is abandoned. Defaults to 600.
 
         Returns:
             stdout: Decoded stdout, cut to its last `TRUNCATE` characters.
@@ -215,11 +258,13 @@ class Master:
             exit code: The remote exit status, 124 on timeout.
         """
         try:
-            result = self.run(command, cwd=cwd, timeout=timeout)
+            result = self.run(command, cwd=cwd, timeout=timeout + EXEC_GRACE_S, login=True, remote_timeout=timeout)
         except subprocess.TimeoutExpired:
             return '', f'timed out after {timeout}s', 124
         stdout = tail(result.stdout.decode('utf-8', errors='replace'))
         stderr = tail(result.stderr.decode('utf-8', errors='replace'))
+        if result.returncode == 124:
+            stderr += f'\n[exit 124: timed out after {timeout}s, or the command itself returned 124]'
         return stdout, stderr, result.returncode
 
     def ssh_command(self) -> str:

@@ -1,6 +1,6 @@
 {
   "name": "remote-ssh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Message between Claude Code sessions on different machines, and run commands, edit files and use project memory on remote hosts over SSH.",
   "author": {
     "name": "Luis Denninger",

@@ -5,4 +5,3 @@ tests/ export-ignore
 .gitignore export-ignore
 pyproject.toml export-ignore
 CONTRIBUTING.md export-ignore
-assets/ export-ignore

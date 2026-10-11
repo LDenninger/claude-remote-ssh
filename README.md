@@ -18,13 +18,15 @@
 
 <p>Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.</p>
 
-Your laptop session sees only your laptop, and the session next to your training run sees only the
-GPU server. remote-ssh connects them over the SSH config you already have: one session asks another
-for its status, hands it a task or collects results from several servers, and you stay in one
-terminal. The same connection runs commands, edits files and loads project memory on each host.
+remote-ssh connects your Claude Code session to the machines you reach over SSH. From one session you
+message the Claude sessions running on those hosts, use each host's project memory, run commands and
+edit remote files. Connections and mounts end with the session.
+
+Without it, a Claude Code session knows only its own machine. The session next to a training run
+never hears from your laptop, and what Claude learned about a project on the server stays on the
+server. remote-ssh closes both gaps over the SSH config you already have.
 
 <img src="assets/demo.gif" alt="A laptop session asks a session on a GPU server for its training status and gets the reply in its conversation, then has it resume training." width="100%">
-
 
 ## ✨ Features
 
@@ -32,13 +34,15 @@ terminal. The same connection runs commands, edits files and loads project memor
   sends them questions or tasks and gets their replies in your conversation. A receiving session
   shows each message to its user and asks before acting on a request they have not covered. Traffic
   runs over your SSH connection, so servers never connect back.
+- **Remote memory:** Claude reads and writes the remote project's memory beside your local memory.
+  What a session learned on the server, such as where the data lives, how runs are started or what
+  failed last time, is there when you work on that server from your laptop, and new notes go back to
+  the server.
 - **Remote commands:** `remote_exec` runs one command on a host. Redirect mode sends every `Bash`
   call there, and a `local:` prefix keeps a single command on your machine.
 - **Quick file access:** connecting a host mounts its project with sshfs automatically, so Claude
   reads and edits remote files with its usual tools, as if they were local. The mount goes away when
   the session ends.
-- **Remote memory:** the remote project's `MEMORY.md` index loads beside your local memory, so what
-  Claude learned about a server stays with that server.
 
 ## 📦 Install
 

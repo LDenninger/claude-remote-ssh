@@ -110,6 +110,33 @@ def test_remote_timeout_ends_the_command(tmp_path: Path) -> None:
     assert time.monotonic() - started < 10
 
 
+def test_remote_timeout_without_gnu_timeout(tmp_path: Path) -> None:
+    #--- a PATH with the tools the watchdog needs but no `timeout`, as on stock macOS ---
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for tool in ('sh', 'bash', 'sleep', 'date'):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    started = time.monotonic()
+    remote = with_remote_timeout(remote_shell('sleep 30; echo late', None), 1)
+    result = subprocess.run(['bash', '-c', remote], capture_output=True, text=True, env={'PATH': str(bin_dir), 'HOME': str(tmp_path)}, timeout=20)
+    assert result.returncode == 124
+    assert 'late' not in result.stdout
+    assert time.monotonic() - started < 10
+
+
+def test_remote_timeout_passes_exit_code_through_without_gnu_timeout(tmp_path: Path) -> None:
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for tool in ('sh', 'bash', 'sleep', 'date'):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    remote = with_remote_timeout(remote_shell('echo out; exit 3', None), 30)
+    started = time.monotonic()
+    result = subprocess.run(['bash', '-c', remote], capture_output=True, text=True, env={'PATH': str(bin_dir), 'HOME': str(tmp_path)}, timeout=20)
+    assert result.returncode == 3
+    assert result.stdout == 'out\n'
+    assert time.monotonic() - started < 5
+
+
 def test_tail() -> None:
     assert tail('abc') == 'abc'
     assert tail('x' * TRUNCATE) == 'x' * TRUNCATE

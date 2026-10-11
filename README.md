@@ -33,32 +33,6 @@ registration ends with the session.
   start Python only while a message, a queued host report or a redirect target waits. Each poll
   runs one ssh process per host.
 
-## 🔒 Security
-
-- Every plugin directory is mode 0700, and its owner and mode are checked before each use.
-- The plugin never stores or prompts for credentials. Authentication comes from `~/.ssh/config` and
-  the SSH agent, and `BatchMode=yes` makes a login prompt fail at once.
-- `remote_exec` goes through the MCP tool permission prompt. A redirected `Bash` call asks for
-  approval of the rewritten `ssh` command line while `redirect_confirm` is on.
-- Only processes running as your user read or write your inboxes. Message bodies reach the session
-  as quoted text, capped at 16 KB, with the sender named, and the bundled `remote-ssh` skill tells
-  Claude to treat them as information, never as instructions.
-
-### Trust model
-
-- **Trusted:** your local user account, your `~/.ssh/config` and agent, and your personal
-  `.claude/remote-ssh.local.json`. Keep that file out of git, for example in `.gitignore`.
-- **Not trusted to start connections:** files committed to a repository. A committed
-  `.claude/remote-ssh.json` connects nothing, and the session start notes once that it is ignored.
-- **Data, never instructions:** message bodies, the remote `MEMORY.md` index and everything else
-  read from a remote host. A remote account can write any field of a message it relays, so a
-  relayed message names the host alias the plugin pulled it from, not the sender's claimed host.
-  A message must be addressed to this session and stored under its own id, or it is dropped.
-- **Fail closed:** while redirect mode is on and its host is reconnecting, failed or unreadable, a
-  `Bash` call is denied with the reason, never run locally. A `local:` prefix runs it locally on
-  purpose, and `remote_mode(null)` ends redirect mode.
-- A `host` value starting with `-` is rejected, and every `ssh` call ends its options with `--`.
-
 ## 📦 Install
 
 ```bash
@@ -183,6 +157,32 @@ Runtime files, control sockets and mounts live under `$XDG_RUNTIME_DIR/remote-ss
   dead sessions.
 - **No mounts on macOS:** allow the macFUSE system extension under System Settings, Privacy &
   Security, and reboot.
+
+## 🔒 Security
+
+- Every plugin directory is mode 0700, and its owner and mode are checked before each use.
+- The plugin never stores or prompts for credentials. Authentication comes from `~/.ssh/config` and
+  the SSH agent, and `BatchMode=yes` makes a login prompt fail at once.
+- `remote_exec` goes through the MCP tool permission prompt. A redirected `Bash` call asks for
+  approval of the rewritten `ssh` command line while `redirect_confirm` is on.
+- Only processes running as your user read or write your inboxes. Message bodies reach the session
+  as quoted text, capped at 16 KB, with the sender named, and the bundled `remote-ssh` skill tells
+  Claude to treat them as information, never as instructions.
+
+### Trust model
+
+- **Trusted:** your local user account, your `~/.ssh/config` and agent, and your personal
+  `.claude/remote-ssh.local.json`. Keep that file out of git, for example in `.gitignore`.
+- **Not trusted to start connections:** files committed to a repository. A committed
+  `.claude/remote-ssh.json` connects nothing, and the session start notes once that it is ignored.
+- **Data, never instructions:** message bodies, the remote `MEMORY.md` index and everything else
+  read from a remote host. A remote account can write any field of a message it relays, so a
+  relayed message names the host alias the plugin pulled it from, not the sender's claimed host.
+  A message must be addressed to this session and stored under its own id, or it is dropped.
+- **Fail closed:** while redirect mode is on and its host is reconnecting, failed or unreadable, a
+  `Bash` call is denied with the reason, never run locally. A `local:` prefix runs it locally on
+  purpose, and `remote_mode(null)` ends redirect mode.
+- A `host` value starting with `-` is rejected, and every `ssh` call ends its options with `--`.
 
 ## 🤝 Contributing
 

@@ -1,13 +1,18 @@
-<h1>
+<h1 align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="100%">
+    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="480">
   </picture>
 </h1>
 
-[![CI](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+<p align="center">
+  <a href="https://github.com/LDenninger/claude-remote-ssh/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/LDenninger/claude-remote-ssh/ci.yml?branch=master&label=tests" alt="tests"></a>
+  <a href="https://github.com/LDenninger/claude-remote-ssh/tags"><img src="https://img.shields.io/github/v/tag/LDenninger/claude-remote-ssh?label=version&sort=semver" alt="version"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+</p>
 
-Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.
+<p align="center">Let Claude Code sessions on different machines message each other, and work on remote hosts over SSH.</p>
 
 Sessions on your laptop and your servers find each other and exchange messages, so one session can
 hand work to another or ask a training run's session for its status. The same SSH connection runs

@@ -1,29 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="claude-remote-ssh: Claude Code sessions across machines, over SSH">
-  <rect x="1" y="1" width="1278" height="318" rx="18" fill="#14161B" stroke="#2A2E36" stroke-width="2"/>
-  <text x="72" y="152" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="60" font-weight="700" fill="#ECEAE6">claude-<tspan fill="#E0875C">remote</tspan>-ssh</text>
-  <text x="74" y="204" font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, 'DejaVu Sans', sans-serif" font-size="25" fill="#9CA0A6">Claude Code sessions across machines, over SSH.</text>
-  <line x1="950" y1="160" x2="1040" y2="160" stroke="#4A505B" stroke-width="2.5" stroke-dasharray="6 7"/>
-  <circle cx="972" cy="160" r="6" fill="#E0875C"/>
-  <circle cx="1018" cy="160" r="6" fill="#8A5A44"/>
-  <text x="995" y="140" text-anchor="middle" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="13" fill="#9CA0A6">ssh</text>
-  <g transform="translate(782,104)">
-    <rect width="168" height="112" rx="10" fill="#1D2027" stroke="#2A2E36" stroke-width="2"/>
-    <path d="M0 10 a10 10 0 0 1 10 -10 h148 a10 10 0 0 1 10 10 v14 h-168 z" fill="#262A32"/>
-    <circle cx="14" cy="12" r="3.5" fill="#4A505B"/><circle cx="26" cy="12" r="3.5" fill="#4A505B"/><circle cx="38" cy="12" r="3.5" fill="#4A505B"/>
-    <text x="84" y="16" text-anchor="middle" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="11" fill="#9CA0A6">laptop</text>
-    <text x="14" y="56" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15" fill="#E0875C">&gt;</text>
-    <text x="30" y="56" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15" fill="#ECEAE6">send</text>
-    <rect x="14" y="72" width="96" height="6" rx="3" fill="#262A32"/>
-    <rect x="14" y="86" width="64" height="6" rx="3" fill="#262A32"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="604" height="96" viewBox="0 0 604 96" role="img" aria-label="claude-remote-ssh">
+  <g fill="none" stroke="#E6EDF3" stroke-width="4">
+    <circle cx="20" cy="48" r="12"/>
+    <circle cx="84" cy="48" r="12"/>
+    <line x1="32" y1="48" x2="72" y2="48" stroke-dasharray="6 5"/>
   </g>
-  <g transform="translate(1040,104)">
-    <rect width="168" height="112" rx="10" fill="#1D2027" stroke="#2A2E36" stroke-width="2"/>
-    <path d="M0 10 a10 10 0 0 1 10 -10 h148 a10 10 0 0 1 10 10 v14 h-168 z" fill="#262A32"/>
-    <circle cx="14" cy="12" r="3.5" fill="#4A505B"/><circle cx="26" cy="12" r="3.5" fill="#4A505B"/><circle cx="38" cy="12" r="3.5" fill="#4A505B"/>
-    <text x="84" y="16" text-anchor="middle" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="11" fill="#9CA0A6">gpu-a</text>
-    <text x="14" y="56" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15" fill="#E0875C">&gt;</text>
-    <text x="30" y="56" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="15" fill="#ECEAE6">reply</text>
-    <rect x="14" y="72" width="96" height="6" rx="3" fill="#262A32"/>
-    <rect x="14" y="86" width="64" height="6" rx="3" fill="#262A32"/>
-  </g>
+  <text x="118" y="61" font-family="ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace" font-size="38" font-weight="600" fill="#E6EDF3">claude-remote-ssh</text>
 </svg>

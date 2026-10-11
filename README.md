@@ -1,7 +1,11 @@
 <h1>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="claude-remote-ssh" width="500">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/mark-dark.svg">
+    <img src="assets/mark-light.svg" alt="" width="112" align="right">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/name-dark.svg">
+    <img src="assets/name-light.svg" alt="claude-remote-ssh" width="396">
   </picture>
 </h1>
 

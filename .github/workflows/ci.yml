@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Each job runs only once the code it checks exists, so the pipeline stays green on a bare branch.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      plugin: ${{ steps.files.outputs.plugin }}
+      unit: ${{ steps.files.outputs.unit }}
+      integration: ${{ steps.files.outputs.integration }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: files
+        run: |
+          echo "plugin=$([ -f .claude-plugin/plugin.json ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "unit=$([ -d tests/unit ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "integration=$([ -d tests/integration ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  versions:
+    needs: detect
+    if: needs.detect.outputs.plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version strings agree
+        run: python .github/scripts/release_check.py
+
+  validate:
+    needs: detect
+    if: needs.detect.outputs.plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code
+        run: npm i -g @anthropic-ai/claude-code
+      - name: Validate plugin
+        run: claude plugin validate . --strict
+
+  unit:
+    needs: detect
+    if: needs.detect.outputs.unit == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+  integration:
+    needs: detect
+    if: needs.detect.outputs.integration == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install sshfs and sshd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshfs openssh-server
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Integration tests
+        run: python -m pytest tests/integration -q

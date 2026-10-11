@@ -19,6 +19,23 @@ def slug(abs_path: str) -> str:
     return re.sub(r'[^A-Za-z0-9-]', '-', abs_path)
 
 
+def cache_path(runtime_dir: Path, alias: str) -> Path:
+    """Return where the server keeps the last read `MEMORY.md` of a host.
+
+    The file sits in `<runtime>/context/` but does not end in `.md`, so the queued-context
+    claim, which takes every `*.md` there, never injects it. The SessionStart hook reads
+    this copy instead of the sshfs mount, whose reads block when the host hangs.
+
+    Args:
+        runtime_dir: Runtime directory of the Claude process.
+        alias: Host alias.
+
+    Returns:
+        The cache file path, whose directory may not exist yet.
+    """
+    return runtime_dir / 'context' / f'{alias}.memory'
+
+
 def remote_memory_dir(remote_home: str, abs_path: str) -> str:
     """Return the remote memory directory of a project.
 

@@ -16,9 +16,10 @@ import os
 import sys
 from typing import Any
 
-SHUTDOWN_WAIT_S = 10.0
-SHUTDOWN_POLL_S = 0.2
 LOCAL_PREFIX = 'local:'
+AUTOCONNECT_FILE = 'autoconnect.json'
+REPO_CONFIG_FILES = ('remote-ssh.json', 'remote-ssh.local.json')
+KEEP_REASONS = ('clear', 'resume')
 MISSING_TOOLS_PERIOD_S = 86400
 
 
@@ -77,9 +78,11 @@ def is_pid_alive(pid: Any) -> bool:
 def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     """Record the session identity, hand autoconnect hosts to the server, inject memory.
 
-    Autoconnect hosts come only from the personal `.claude/remote-ssh.local.json`. A committed
-    `.claude/remote-ssh.json` would let any cloned repository open ssh connections, so it is
-    ignored, with a note once per session.
+    Autoconnect hosts come only from `autoconnect.json` in the message base
+    (`~/.claude/remote-ssh/` unless `REMOTE_SSH_MSG_BASE` is set), under
+    `projects.<absolute project path>.hosts`. A file inside the repository would let any cloned
+    repository open ssh connections, so `.claude/remote-ssh.json` and
+    `.claude/remote-ssh.local.json` are ignored, with a note once per session.
     """
     import socket
     from pathlib import Path
@@ -94,16 +97,19 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     owner = runtime.owner()
 
     #--- autoconnect.json first: the session id in owner.json is the server's signal ---
-    config_dir = Path(cwd) / '.claude'
-    config = state.read_json(config_dir / 'remote-ssh.local.json', {})
-    config_hosts = config.get('hosts', []) if isinstance(config, dict) else []
+    config_path = state.msg_base() / AUTOCONNECT_FILE
+    config = state.read_json(config_path, {})
+    projects = config.get('projects') if isinstance(config, dict) else None
+    project = projects.get(cwd) if isinstance(projects, dict) else None
+    config_hosts = project.get('hosts') if isinstance(project, dict) else None
     autoconnect = [
         {'alias': entry['alias'], 'host': entry['host'], 'path': entry.get('path', '~')}
-        for entry in config_hosts
-        if isinstance(entry, dict) and entry.get('autoconnect') and entry.get('alias') and entry.get('host')
+        for entry in (config_hosts if isinstance(config_hosts, list) else [])
+        if isinstance(entry, dict) and entry.get('alias') and entry.get('host')
     ]
     state.write_json_atomic(runtime.dir / 'autoconnect.json', autoconnect)
-    note_shared = (config_dir / 'remote-ssh.json').exists() and owner.get('shared_config_noted') != session_id
+    repo_config = [name for name in REPO_CONFIG_FILES if (Path(cwd) / '.claude' / name).exists()]
+    note_shared = bool(repo_config) and owner.get('shared_config_noted') != session_id
     runtime.update_owner(
         session_id=session_id,
         cwd=cwd,
@@ -118,19 +124,20 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     blocks = []
     for alias, entry in runtime.load_state()['hosts'].items():
         if entry.get('status') == 'connected' and entry.get('mounted_mem'):
-            mem_dir = runtime.mem_path(alias)
+            #--- the server's copy of the index: a read through the sshfs mount blocks on a hung host ---
             try:
-                index_md = (mem_dir / 'MEMORY.md').read_text(encoding='utf-8', errors='replace')
+                index_md = memory.cache_path(runtime.dir, alias).read_text(encoding='utf-8', errors='replace')
             except OSError:
-                index_md = None
-            blocks.append(memory.render_block(alias, index_md, mem_dir if index_md is not None else None))
+                continue
+            blocks.append(memory.render_block(alias, index_md, runtime.mem_path(alias)))
     #--- the server reads autoconnect.json once per process, and marks owner.json when it has ---
     if autoconnect and not owner.get('autoconnect_read'):
         aliases = ', '.join(entry['alias'] for entry in autoconnect)
         blocks.append(f'remote-ssh: connecting {aliases} in the background. Mounts and remote memory arrive with the next prompt or tool call.')
     if note_shared:
-        blocks.append('remote-ssh: .claude/remote-ssh.json is ignored for autoconnect, since a committed file must not open ssh '
-                      'connections. Move personal autoconnect hosts to .claude/remote-ssh.local.json and keep it out of git.')
+        blocks.append(f'remote-ssh: .claude/{" and .claude/".join(repo_config)} in this project is ignored, since a repository file must not '
+                      f'open ssh connections. Autoconnect hosts are read from {config_path}, '
+                      'as {"projects": {"<absolute project path>": {"hosts": [{"alias", "host", "path"}]}}}.')
     return build_output('SessionStart', '\n\n'.join(blocks), missing_tools_message())
 
 
@@ -157,27 +164,23 @@ def missing_tools_message() -> str:
 
 
 def on_session_end(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Ask the server to tear down and wait up to `SHUTDOWN_WAIT_S` for it to finish.
+    """Ask the server to tear down, and return at once.
 
-    A `/clear` also fires SessionEnd while the same Claude process continues, so that
-    reason keeps every connection.
+    SessionEnd hooks share a 1.5 s budget that a plugin hook's `timeout` does not raise, so the
+    hook only touches the shutdown file and the server disconnects on its next tick. `/clear`
+    and `/resume` also fire SessionEnd while the same Claude process continues, so those
+    reasons keep every connection.
     """
-    if payload.get('reason') == 'clear':
+    if payload.get('reason') in KEEP_REASONS:
         return None
-    import time
-
     from remote_ssh import state
 
     runtime = state.Runtime.current()
     if runtime is None:
         return None
     server_pid = runtime.owner().get('server_pid')
-    if not server_pid or not is_pid_alive(server_pid):
-        return None
-    runtime.shutdown_path.touch()
-    deadline = time.monotonic() + SHUTDOWN_WAIT_S
-    while runtime.shutdown_path.exists() and time.monotonic() < deadline:
-        time.sleep(SHUTDOWN_POLL_S)
+    if server_pid and is_pid_alive(server_pid):
+        runtime.shutdown_path.touch()
     return None
 
 

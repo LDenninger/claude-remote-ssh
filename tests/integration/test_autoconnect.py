@@ -16,12 +16,17 @@ from conftest import run_hook, wait_for
 CONNECT_LIMIT_S = 30.0
 
 
+def write_autoconnect(msg_base: Path, project: Path, hosts: list[dict]) -> None:
+    """Write the user-level autoconnect file of the session whose message base is `msg_base`."""
+    msg_base.mkdir(mode=0o700, exist_ok=True)
+    (msg_base / 'autoconnect.json').write_text(json.dumps({'projects': {str(project): {'hosts': hosts}}}))
+
+
 def test_autoconnect_delivers_memory_block_once(session: Any, sshd: dict, remote_dir: Path, remote_memory_dir: Path, tmp_path: Path) -> None:
     (remote_memory_dir / 'MEMORY.md').write_text('# Memory\n- [Cluster quota](quota.md) is 4 GPUs\n')
     cwd = tmp_path / 'proj'
-    (cwd / '.claude').mkdir(parents=True)
-    hosts = [{'alias': 'h1', 'host': sshd['host'], 'path': str(remote_dir), 'autoconnect': True}]
-    (cwd / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
+    cwd.mkdir()
+    write_autoconnect(tmp_path / 'msg-a', cwd, [{'alias': 'h1', 'host': sshd['host'], 'path': str(remote_dir)}])
     sess = session('a', cwd=cwd)
 
     queued = sess.rt / 'context' / 'h1.md'

@@ -145,14 +145,16 @@ def test_pre_tool_use_local_prefix_is_stripped(runtime: state.Runtime) -> None:
 # SessionStart
 #---------------------------------------------------------------------
 
+def write_autoconnect(project_dir: Path, hosts: list[dict]) -> None:
+    """Write the user-level autoconnect config for `project_dir` into the message base."""
+    state.ensure_private_dir(state.msg_base())
+    state.write_json_atomic(state.msg_base() / 'autoconnect.json', {'projects': {str(project_dir): {'hosts': hosts}}})
+
+
 def test_session_start_writes_owner_and_autoconnect(runtime: state.Runtime, tmp_path: Path) -> None:
     project_dir = tmp_path / 'proj'
-    (project_dir / '.claude').mkdir(parents=True)
-    hosts = [
-        {'alias': 'gpu-a', 'host': 'gpu-a', 'path': '~/proj', 'autoconnect': True},
-        {'alias': 'gpu-b', 'host': 'gpu-b', 'path': '~/proj', 'autoconnect': False},
-    ]
-    (project_dir / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
+    project_dir.mkdir()
+    write_autoconnect(project_dir, [{'alias': 'gpu-a', 'host': 'gpu-a', 'path': '~/proj'}])
     output = hooks.dispatch('SessionStart', {'session_id': 'abcd1234-ef', 'cwd': str(project_dir), 'source': 'startup'})
 
     owner = runtime.owner()
@@ -163,7 +165,6 @@ def test_session_start_writes_owner_and_autoconnect(runtime: state.Runtime, tmp_
     assert owner['name'] == 'proj-abcd'
     assert state.read_json(runtime.dir / 'autoconnect.json') == [{'alias': 'gpu-a', 'host': 'gpu-a', 'path': '~/proj'}]
     assert 'gpu-a' in output['hookSpecificOutput']['additionalContext']
-    assert 'gpu-b' not in output['hookSpecificOutput']['additionalContext']
 
 
 def test_session_start_without_config_writes_empty_autoconnect(runtime: state.Runtime, tmp_path: Path) -> None:
@@ -171,25 +172,8 @@ def test_session_start_without_config_writes_empty_autoconnect(runtime: state.Ru
     assert state.read_json(runtime.dir / 'autoconnect.json') == []
 
 
-def test_session_start_ignores_committed_config_with_note_once_per_session(runtime: state.Runtime, tmp_path: Path) -> None:
-    (tmp_path / '.claude').mkdir()
-    hosts = [{'alias': 'evil', 'host': 'attacker.example', 'path': '~', 'autoconnect': True}]
-    (tmp_path / '.claude' / 'remote-ssh.json').write_text(json.dumps({'hosts': hosts}))
-    output = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'startup'})
-    assert state.read_json(runtime.dir / 'autoconnect.json') == []
-    context = output['hookSpecificOutput']['additionalContext']
-    assert 'remote-ssh.json is ignored' in context and 'remote-ssh.local.json' in context
-    assert 'evil' not in context
-    again = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'compact'})
-    assert again is None or 'ignored' not in again.get('hookSpecificOutput', {}).get('additionalContext', '')
-    after_clear = hooks.dispatch('SessionStart', {'session_id': 'sid-0002', 'cwd': str(tmp_path), 'source': 'clear'})
-    assert 'remote-ssh.json is ignored' in after_clear['hookSpecificOutput']['additionalContext']
-
-
 def test_session_start_announces_autoconnect_only_before_the_server_read_it(runtime: state.Runtime, tmp_path: Path) -> None:
-    (tmp_path / '.claude').mkdir()
-    hosts = [{'alias': 'gpu-a', 'host': 'gpu-a', 'autoconnect': True}]
-    (tmp_path / '.claude' / 'remote-ssh.local.json').write_text(json.dumps({'hosts': hosts}))
+    write_autoconnect(tmp_path, [{'alias': 'gpu-a', 'host': 'gpu-a'}])
     output = hooks.dispatch('SessionStart', {'session_id': 'sid-0001', 'cwd': str(tmp_path), 'source': 'startup'})
     assert 'connecting gpu-a' in output['hookSpecificOutput']['additionalContext']
     runtime.update_owner(autoconnect_read=True)

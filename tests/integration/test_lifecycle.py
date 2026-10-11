@@ -11,7 +11,7 @@ from typing import Any
 
 from conftest import ROOT, Mcp, base_env, is_running, pids_matching, release_leftovers, runtime_dir_of, start_session_hook, wait_for
 
-from remote_ssh import state
+from remote_ssh import mount, state
 
 TEARDOWN_LIMIT_S = 10.0
 RECONNECT_LIMIT_S = 45.0
@@ -20,8 +20,8 @@ RECONNECT_LIMIT_S = 45.0
 def assert_released(rt: Path, alias: str) -> None:
     """Assert that no mount, ssh process or control socket of `alias` remains."""
     host_dir = rt / alias
-    assert not os.path.ismount(host_dir / 'fs')
-    assert not os.path.ismount(host_dir / 'mem')
+    assert not mount.is_mounted(host_dir / 'fs')
+    assert not mount.is_mounted(host_dir / 'mem')
     assert not (host_dir / 'c').exists()
     assert pids_matching(str(host_dir / 'c')) == []
 
@@ -66,6 +66,19 @@ def test_i1_connect_exec_mount_disconnect(session: Any, sshd: dict, remote_dir: 
     assert_released(sess.rt, 'h1')
     assert 'h1' not in state.read_json(sess.rt / 'state.json')['hosts']
     assert (remote_dir / 'hello.txt').read_text() == 'edited\n'
+
+
+def test_disconnect_releases_mount_whose_remote_directory_vanished(session: Any, sshd: dict, tmp_path: Path) -> None:
+    gone = (tmp_path / 'remote-gone').resolve()
+    gone.mkdir()
+    sess = session('a')
+    text, is_error = sess.mcp.call('remote_connect', alias='h1', host=sshd['host'], path=str(gone))
+    assert not is_error, text
+    gone.rmdir()
+
+    text, is_error = sess.mcp.call('remote_disconnect', alias='h1')
+    assert not is_error, text
+    assert_released(sess.rt, 'h1')
 
 
 #---------------------------------------------------------------------

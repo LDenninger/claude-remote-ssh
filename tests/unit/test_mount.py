@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
+import os
 import subprocess
 import sys
 import types
@@ -79,3 +81,33 @@ def test_unmount_reports_failure(mount_mod: types.ModuleType, monkeypatch: pytes
     monkeypatch.setattr(mount_mod, 'is_mounted', lambda mp: True)
     monkeypatch.setattr(subprocess, 'run', lambda argv, **kwargs: (_ for _ in ()).throw(OSError('missing')))
     assert mount_mod.unmount(Path('/mnt/x')) is False
+
+
+def test_is_mounted_reads_kernel_mount_table(tmp_path, monkeypatch):
+    from remote_ssh import mount as mount_mod
+    table = tmp_path / 'mountinfo'
+    table.write_text(
+        '36 35 98:0 / /mnt/a\\040b rw,noatime master:1 - fuse.sshfs h:/x rw\n'
+        '37 35 98:0 / /plain rw - ext4 /dev/sda1 rw\n'
+    )
+    monkeypatch.setattr(mount_mod, 'MOUNTINFO', table)
+    assert mount_mod.is_mounted(Path('/mnt/a b'))
+    assert mount_mod.is_mounted(Path('/plain'))
+    assert not mount_mod.is_mounted(Path('/mnt/a'))
+
+
+def test_is_mounted_counts_dead_mount_without_mount_table(tmp_path, monkeypatch):
+    from remote_ssh import mount as mount_mod
+    monkeypatch.setattr(mount_mod, 'MOUNTINFO', tmp_path / 'absent')
+    dead = tmp_path / 'fs'
+    dead.mkdir()
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path) == dead:
+            raise OSError(errno.ENOTCONN, 'Transport endpoint is not connected')
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(mount_mod.os, 'lstat', lstat)
+    assert mount_mod.is_mounted(dead)
+    assert not mount_mod.is_mounted(tmp_path / 'missing')

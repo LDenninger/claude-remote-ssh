@@ -261,15 +261,15 @@ def test_background_connect_queues_report_and_tool_connect_does_not(live_app: tu
 class TickHost:
     """Host session stand-in for `tick`: a master probe, `-O check` and reconnect counters."""
 
-    def __init__(self, listening: bool = True, healthy: bool = True) -> None:
+    def __init__(self, listening: bool = True, healthy: bool = True, exited: bool = False) -> None:
         self.alias, self.host, self.status, self.error = 'gpu-a', 'h', 'connected', None
         self.lock = threading.Lock()
         self.retry_at, self.retry_delay = 0.0, 1.0
-        self.master = SimpleNamespace(alias='gpu-a', is_listening=lambda: listening)
+        self.master = SimpleNamespace(alias='gpu-a', is_listening=lambda: listening, exited=lambda: exited, check=self.check)
         self.healthy = healthy
-        self.checks = self.reconnects = 0
+        self.checks = self.reconnects = self.failures = 0
 
-    def is_healthy(self) -> bool:
+    def check(self) -> bool:
         self.checks += 1
         return self.healthy
 
@@ -317,12 +317,51 @@ def test_tick_with_messaging_detects_dead_master(tick_app: tuple[server.Server, 
     if error is not None:
         pulls.append(error)
     host = TickHost(listening=listening)
+    host.failures = server.HEALTH_FAILURE_LIMIT - 1
     app.hosts = {'gpu-a': host}
     app.tick()
     assert wait_until(lambda: host.reconnects == 1 and not host.lock.locked())
     assert host.checks == 0
     assert pulls == []
     assert app.runtime.load_state()['hosts']['gpu-a']['status'] == 'reconnecting'
+
+
+@pytest.mark.parametrize('listening, error', [(False, None), (True, server.relay.RemoteCommandError(255, 'mux failed')),
+                                              (True, subprocess.TimeoutExpired('ssh', 5))])
+def test_tick_keeps_master_on_one_transient_failure(tick_app: tuple[server.Server, list], listening: bool, error: Exception | None) -> None:
+    """A single failed probe must not tear down a working master: the next probe succeeds."""
+    app, pulls = tick_app
+    if error is not None:
+        pulls.append(error)
+    host = TickHost(listening=listening)
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert wait_until(lambda: host.failures == 1 and not host.lock.locked())
+    assert (host.status, host.reconnects) == ('connected', 0)
+    host.master.is_listening = lambda: True
+    app.tick()
+    assert wait_until(lambda: host.failures == 0 and not host.lock.locked())
+    assert (host.status, host.reconnects) == ('connected', 0)
+
+
+def test_tick_reconnects_after_consecutive_failures(tick_app: tuple[server.Server, list]) -> None:
+    app, _ = tick_app
+    host = TickHost(listening=False)
+    app.hosts = {'gpu-a': host}
+    for expected in range(1, server.HEALTH_FAILURE_LIMIT):
+        app.tick()
+        assert wait_until(lambda: host.failures == expected and not host.lock.locked())
+        assert host.reconnects == 0
+    app.tick()
+    assert wait_until(lambda: host.reconnects == 1 and not host.lock.locked())
+
+
+def test_tick_reconnects_at_once_when_the_master_process_exited(tick_app: tuple[server.Server, list]) -> None:
+    app, _ = tick_app
+    host = TickHost(listening=False, exited=True)
+    app.hosts = {'gpu-a': host}
+    app.tick()
+    assert wait_until(lambda: host.reconnects == 1 and not host.lock.locked())
 
 
 def test_tick_keeps_host_on_remote_command_failure(tick_app: tuple[server.Server, list]) -> None:
@@ -340,6 +379,7 @@ def test_tick_without_messaging_uses_check_only(tick_app: tuple[server.Server, l
     app, pulls = tick_app
     app.config.messaging = False
     host = TickHost(healthy=healthy)
+    host.failures = server.HEALTH_FAILURE_LIMIT - 1
     app.hosts = {'gpu-a': host}
     app.tick()
     assert wait_until(lambda: host.checks == 1)

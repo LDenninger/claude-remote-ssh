@@ -10,6 +10,9 @@ All notable changes to this project are documented in this file. The format foll
 
 - The MCP server is declared in `.claude-plugin/plugin.json` instead of a root `.mcp.json`, so a
   session started inside the plugin repository no longer loads it as a broken project server.
+- One slow or failed health probe no longer tears down a working SSH connection: the server
+  reconnects a host after 3 failed probes in a row, or at once when the master process exited.
+  `remote_status` reports `master-down` from a local socket probe instead of an `ssh -O check`.
 
 ### Changed
 

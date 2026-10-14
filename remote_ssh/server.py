@@ -37,6 +37,7 @@ WORKER_JOIN_S = 5.0
 RESOLVE_TIMEOUT_S = 30.0
 SSH_ERROR_EXIT = 255
 POLL_PULL_TIMEOUT_S = 5.0
+HEALTH_FAILURE_LIMIT = 3
 TEARDOWN_MESSAGING_TIMEOUT_S = 3.0
 TEARDOWN_LOCK_WAIT_S = 2.0
 MEMORY_READ_TIMEOUT_S = 3.0
@@ -291,6 +292,7 @@ class HostSession:
         self.error: str | None = None
         self.retry_at = 0.0
         self.retry_delay = 1.0
+        self.failures = 0
         self.lock = threading.Lock()
 
     #---------------------------------------------------------------------
@@ -391,8 +393,12 @@ class HostSession:
         return report
 
     def is_healthy(self) -> bool:
-        """Return whether the ControlMaster still answers `-O check`."""
-        return self.master.check()
+        """Return whether the ControlMaster process runs and its control socket accepts connections.
+
+        A local probe without an ssh process, so a master that is busy or slow to answer
+        `-O check` is not reported as down.
+        """
+        return not self.master.exited() and self.master.is_listening()
 
     #---------------------------------------------------------------------
     # Views
@@ -1149,8 +1155,10 @@ class Server:
         One ssh process per host and tick: with messaging on, the outbox pull doubles as
         the health check, behind an in-process probe of the control socket, since ssh
         falls back to a direct connection when the master is dead. With messaging off,
-        `-O check` asks the master over its local socket. The caller acquired
-        `session.lock`, and this method releases it on every path.
+        `-O check` asks the master over its local socket. A failed probe marks the host
+        for reconnect only when the master process has exited or `HEALTH_FAILURE_LIMIT`
+        ticks in a row failed, so one slow answer never tears down a working master.
+        The caller acquired `session.lock`, and this method releases it on every path.
         """
         reconnect_due = False
         try:
@@ -1159,9 +1167,11 @@ class Server:
                 if store is not None and session_id:
                     healthy = session.master.is_listening() and self.__pull(session, session_id, store)
                 else:
-                    healthy = session.is_healthy()
-                if not healthy:
-                    LOG.warning('%s: master check failed, reconnecting', session.alias)
+                    healthy = session.master.check()
+                session.failures = 0 if healthy else session.failures + 1
+                if not healthy and (session.master.exited() or session.failures >= HEALTH_FAILURE_LIMIT):
+                    LOG.warning('%s: master check failed %d times, reconnecting', session.alias, session.failures)
+                    session.failures = 0
                     session.status, session.retry_at, session.retry_delay = 'reconnecting', now, 1.0
                     self.__save_host(session)
             reconnect_due = session.status == 'reconnecting' and now >= session.retry_at

@@ -4,6 +4,51 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `remote_send` takes `files`, up to 10 local files of 5 MB in total, copied over the existing
+  connection to `attachments/<message id>/` in the recipient's message store and listed in the
+  delivered message under `attachments:`. A recipient that pulls from a host outbox receives them
+  with the message.
+- `remote_inbox` lists the messages this session sent with a state: `waiting`, `read` or `answered`.
+  A host's states cost one ssh round trip per call.
+- A session keeps its name across `--resume` and `/clear` in the same directory. The new registration
+  takes over the name, moves the unread inbox and carries `previous_ids`, so messages to an old id or
+  name reach it, on the host too.
+- A server that has no session id (plugin loaded with `/reload-plugins`) raises a `need-session`
+  flag, and the next prompt or tool-call hook writes the id from its payload, so the session registers.
+
+### Changed
+
+- `remote_connect` counts `N other sessions`, the rows `remote_sessions` shows without `this session`.
+  Where Bash runs moves from the first line (`bash local`) to a `bash:` field that names the
+  command to switch (`runs here (remote_mode("node2") runs it on node2)`).
+- The `memory:` field of `remote_connect` reads `none` when the remote project has no memory
+  directory or an empty index, and `not mounted` when the mount is unavailable.
+- `remote_status` adds one `--- mounts of <alias> ---` block per host with the remote path and its
+  local mount for files and memory, and `next: remote_connect(...)` when no host is connected.
+- `remote_disconnect` reports `replies fetched` only when a reply was fetched, and its note names the
+  memory path that is gone and how to read it again.
+- A redirected Bash result starts with the line `[<alias>]`, so the host that ran it is visible. The
+  exit code is unchanged.
+- `remote_mode` also reads the strings `null`, `none` and `off` as local mode. Any other alias must be
+  connected.
+- `remote_send` reports `delivered` and that the reply arrives in this conversation, without the
+  message id and route. An unknown target lists the current session names and why it may be missing.
+- `remote_sessions` marks the caller's own registration `(this session)` and names the machine it runs on.
+
+### Fixed
+
+- A message of about 1 800 characters arrived cut off mid-word while `remote_send` reported success.
+  Claude Code 2.1.296 cuts a monitor line at 500 characters and a monitor event at 3 000, and hook
+  context at 8 000 characters and 200 lines. The monitor wraps long lines and prints a one-line
+  notice for a message above 2 800 characters, and the hook injects a notice above 7 440 characters
+  or 190 lines. `remote_inbox` shows the full text.
+- Runtime directories whose `owner.json` has no `claude_pid` were never removed. They are removed
+  when their server process is dead.
+
 ## [0.1.1] - 2026-10-11
 
 ### Fixed

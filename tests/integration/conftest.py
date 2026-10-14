@@ -270,16 +270,17 @@ def start_session_hook(env: dict[str, str], name: str, cwd: Path) -> str:
 def session(sshd: dict, tmp_path: Path) -> Any:
     """Yield a factory for isolated plugin sessions, each with its own stand-in Claude process.
 
-    The factory takes a name and optional overrides of the session env, e.g. a message base.
+    The factory takes a name and optional overrides of the session env, e.g. a message base. With
+    `hook=False` it skips the SessionStart hook, as a session whose plugin came from /reload-plugins.
     """
     made: list[Session] = []
 
-    def make(name: str, cwd: Path | None = None, **env_overrides: str) -> Session:
+    def make(name: str, cwd: Path | None = None, hook: bool = True, **env_overrides: str) -> Session:
         stand_in = subprocess.Popen(['sleep', '3600'])
         cwd = cwd or tmp_path / name
         cwd.mkdir(parents=True, exist_ok=True)
         env = {**base_env(sshd, tmp_path, name), **env_overrides, 'REMOTE_SSH_CLAUDE_PID': str(stand_in.pid)}
-        sid = start_session_hook(env, name, cwd)
+        sid = start_session_hook(env, name, cwd) if hook else f'{name}-0000-0000-0000-000000000000'
         made.append(Session(env, Mcp(env), sid, cwd, stand_in, runtime_dir_of(tmp_path / 'rt', stand_in.pid)))
         return made[-1]
 

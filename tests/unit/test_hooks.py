@@ -107,7 +107,8 @@ def test_pre_tool_use_redirect_rewrites_and_asks(runtime: state.Runtime) -> None
     argv = shlex.split(updated['command'])
     assert argv[:3] == ['ssh', '-S', str(runtime.ctl_path('gpu-a'))]
     assert 'user@gpu' in argv
-    assert 'cd -- /srv/proj && ls -la' in argv[-1]
+    inner = shlex.split(shlex.split(argv[-1])[-1])[-1]
+    assert inner == "cd -- /srv/proj && { printf '[%s]\\n' gpu-a\nls -la\n}"
 
 
 @pytest.mark.parametrize('value', ['false', 'False', '0'])
@@ -256,6 +257,40 @@ def test_message_hook_announces_messages_left_pending(runtime: state.Runtime) ->
 
 
 #---------------------------------------------------------------------
+# Session id after /reload-plugins
+#---------------------------------------------------------------------
+
+@pytest.mark.parametrize('event', ['UserPromptSubmit', 'PostToolUse'])
+def test_message_hook_records_the_session_id_the_server_asked_for(runtime: state.Runtime, tmp_path: Path, event: str) -> None:
+    runtime.need_session_path.touch()
+    assert hooks.dispatch(event, {'session_id': 'sid-0001', 'cwd': str(tmp_path / 'proj')}) is None
+    owner = runtime.owner()
+    assert (owner['session_id'], owner['cwd'], owner['name']) == ('sid-0001', str(tmp_path / 'proj'), 'proj-sid-')
+    assert owner['claude_pid'] == os.getpid()
+    assert not runtime.need_session_path.exists()
+
+
+def test_message_hook_leaves_owner_alone_without_the_flag_or_with_a_known_id(runtime: state.Runtime) -> None:
+    hooks.dispatch('UserPromptSubmit', {'session_id': 'sid-0001', 'cwd': '/w'})
+    assert runtime.owner() == {}
+    runtime.update_owner(session_id='known-0001', cwd='/w/known')
+    runtime.need_session_path.touch()
+    hooks.dispatch('UserPromptSubmit', {'session_id': 'sid-0002', 'cwd': '/w/other'})
+    assert runtime.owner() == {'session_id': 'known-0001', 'cwd': '/w/known'}
+    assert not runtime.need_session_path.exists()
+
+
+def test_compact_keeps_the_name_the_server_took_over(runtime: state.Runtime, tmp_path: Path) -> None:
+    hooks.dispatch('SessionStart', {'session_id': 'new2-0002', 'cwd': str(tmp_path / 'proj')})
+    assert runtime.owner()['name'] == 'proj-new2'
+    runtime.update_owner(name='proj-old1')
+    hooks.dispatch('SessionStart', {'session_id': 'new2-0002', 'cwd': str(tmp_path / 'proj'), 'source': 'compact'})
+    assert runtime.owner()['name'] == 'proj-old1'
+    hooks.dispatch('SessionStart', {'session_id': 'new3-0003', 'cwd': str(tmp_path / 'proj'), 'source': 'clear'})
+    assert runtime.owner()['name'] == 'proj-new3'
+
+
+#---------------------------------------------------------------------
 # Shell fast path in hooks/hooks.json
 #---------------------------------------------------------------------
 
@@ -305,6 +340,14 @@ def test_message_hooks_start_python_only_for_waiting_work(runtime: state.Runtime
 
     runtime.queue_context('gpu-a', 'block')
     assert run_hook_command(event, fake_root, env).stdout == f'python {event}\n'
+    runtime.claim_context()
+    assert run_hook_command(event, fake_root, env).stdout == ''
+
+    #--- the server without a session id asks for one ---
+    runtime.need_session_path.touch()
+    assert run_hook_command(event, fake_root, env).stdout == f'python {event}\n'
+    runtime.need_session_path.unlink()
+    assert run_hook_command(event, fake_root, env).stdout == ''
 
 
 def test_pre_tool_use_hook_starts_python_only_while_redirect_is_set(runtime: state.Runtime, fake_root: Path) -> None:

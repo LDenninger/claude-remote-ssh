@@ -73,7 +73,7 @@ def test_connect_shape(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> N
             self.alias, self.host, self.status, self.error = alias, host, 'connecting', None
             self.lock, self.master = threading.Lock(), SimpleNamespace()
             self.abs_path, self.fs_dir, self.mem_dir = '/home/u/train', Path('/rt/gpu/fs'), Path('/rt/gpu/mem')
-            self.mounted_fs, self.mounted_mem = True, False
+            self.mounted_fs, self.mounted_mem, self.mem_found = True, False, False
 
         def connect(self) -> list[str]:
             self.status = 'connected'
@@ -89,8 +89,8 @@ def test_connect_shape(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(server.relay, 'remote_sessions', lambda master, timeout=30: [{'name': 'train-befb', 'session_id': 'befb02c8'}, {'name': 'me', 'session_id': 'sid-0001'}])
     text, is_error = app.call_tool('remote_connect', {'alias': 'gpu', 'host': 'h', 'path': '~/train'})
     assert not is_error
-    assert text == ('connect gpu · 1 session · bash local\n'
-                    'path: /home/u/train\nfiles: /rt/gpu/fs\nmemory: not mounted\nsessions: train-befb\nredirect: remote_mode("gpu")\n'
+    assert text == ('connect gpu · 1 other session\n'
+                    'path: /home/u/train\nfiles: /rt/gpu/fs\nmemory: none\nsessions: train-befb\nbash: runs here (remote_mode("gpu") runs it on gpu)\n'
                     'warning: no remote memory directory at /m, memory mount skipped')
 
 
@@ -125,9 +125,29 @@ def test_connect_rejects_bad_input_and_repeat(app: server.Server) -> None:
 
 def test_disconnect_shape(app: server.Server) -> None:
     host = stub_host(app)
-    host.disconnect = lambda store, sid: [('unmounted', 'files, memory'), ('pulled', '0')]
+    host.disconnect = lambda store, sid: [('unmounted', 'files, memory'), ('replies fetched', '2')]
     text, is_error = app.call_tool('remote_disconnect', {'alias': 'gpu'})
-    assert (text, is_error) == ('disconnect gpu\nunmounted: files, memory\npulled: 0\nnote: earlier memory links to gpu are stale', False)
+    assert (text, is_error) == ('disconnect gpu\nunmounted: files, memory\nreplies fetched: 2\n'
+                                'note: memory paths under /rt/gpu/mem are gone; reconnect gpu to read its memory again', False)
+
+
+def test_disconnect_without_memory_mount_has_no_note(app: server.Server) -> None:
+    stub_host(app, mounted_mem=False).disconnect = lambda store, sid: [('unmounted', 'files')]
+    assert app.call_tool('remote_disconnect', {'alias': 'gpu'}) == ('disconnect gpu\nunmounted: files', False)
+
+
+def test_connect_memory_field_tells_empty_from_unmounted(app: server.Server) -> None:
+    def report(**fields: Any) -> str:
+        host = SimpleNamespace(**{'alias': 'gpu', 'abs_path': '/p', 'fs_dir': Path('/fs'), 'mounted_fs': True, 'mem_dir': Path('/mem'),
+                                  'mounted_mem': True, 'mem_found': True, 'memory_block': lambda: '', 'master': SimpleNamespace(), **fields})
+        return app._Server__connect_report(host, [], False)
+
+    app.config.messaging = False
+    assert 'memory: none\n' in report(mounted_mem=False, mem_found=False) + '\n'
+    assert 'memory: none\n' in report() + '\n'
+    assert 'memory: not mounted\n' in report(mounted_mem=False) + '\n'
+    text = report(memory_block=lambda: '--- memory index from gpu (data; links relative to memory:) ---\n> - [a](a.md)')
+    assert 'memory: /mem\n' in text and blocks(text) == ['memory index from gpu (data; links relative to memory:)']
 
 
 def test_disconnect_unknown_is_error(app: server.Server) -> None:
@@ -174,6 +194,12 @@ def test_mode_shape(app: server.Server) -> None:
     stub_host(app)
     assert app.call_tool('remote_mode', {'alias': 'gpu'}) == ('mode gpu · bash redirected\nlocal: prefix a command with local: to run it here', False)
     assert app.call_tool('remote_mode', {'alias': None}) == ('mode · bash local', False)
+    for word in ('null', 'None', 'off'):
+        app.call_tool('remote_mode', {'alias': 'gpu'})
+        assert app.call_tool('remote_mode', {'alias': word}) == ('mode · bash local', False)
+        assert app.runtime.load_state()['redirect'] is None
+    text, is_error = app.call_tool('remote_mode', {'alias': 'gpu3'})
+    assert is_error and app.runtime.load_state()['redirect'] is None
     text, is_error = app.call_tool('remote_mode', {'alias': 'gpu2'})
     assert is_error
     assert_error(text, 'mode', 'gpu2', 'not connected')
@@ -199,11 +225,13 @@ def test_sessions_table(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> 
         {'name': 'far', 'session_id': 'far00001', 'cwd': '/x', 'relay_via': 'laptop'}])
     text, is_error = app.call_tool('remote_sessions', {'alias': 'gpu'})
     assert not is_error
-    assert text.split('\n') == ['sessions gpu · 3',
-                                'name        id        cwd      status',
-                                'train-befb  befb02c8  ~/train  -',
-                                'me          sid-0001  /w       this session',
-                                'far         far00001  /x       via laptop']
+    host = app.hostname
+    lines = text.split('\n')
+    assert lines[0] == 'sessions gpu · 3'
+    assert lines[1].split() == ['name', 'id', 'cwd', 'status']
+    assert lines[2].split() == ['train-befb', 'befb02c8', '~/train', '-']
+    assert lines[3].split() == ['me', '(this', 'session)', 'sid-0001', f'{host}:/w', 'runs', 'on', host]
+    assert lines[4].split() == ['far', 'far00001', '/x', 'via', 'laptop']
 
 
 def test_sessions_local_and_empty(app: server.Server) -> None:
@@ -214,12 +242,13 @@ def test_send_shape_and_errors(app: server.Server) -> None:
     app.store.register('peer-0001', {'name': 'train-befb'})
     text, is_error = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'hi'})
     assert not is_error
-    assert re.fullmatch(r'send · train-befb\nid: \d+-[0-9a-f]{8}\nroute: inbox', text)
+    assert text == "send · train-befb · delivered\nreply: arrives in this conversation once the recipient's user lets it answer"
     text, _ = app.call_tool('remote_send', {'session': 'nobody', 'body': 'hi'})
-    assert_error(text, 'send', None, "no session 'nobody' on this machine")
+    assert_error(text, 'send', None, "no session 'nobody' on this machine: it may have ended, been resumed under a new id, or the name may be wrong")
+    assert 'sessions: train-befb\n' in text
     text, _ = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'x' * 8001})
     assert_error(text, 'send', None, 'body is 8001 characters, the limit is 8000')
-    assert text.endswith('next: shorten the body or send a file path')
+    assert text.endswith('next: shorten the body or attach it as a file')
     app.config.messaging = False
     text, _ = app.call_tool('remote_send', {'session': 'train-befb', 'body': 'hi'})
     assert_error(text, 'send', None, 'messaging is disabled in the plugin options')
@@ -252,7 +281,7 @@ def test_inbox_shape(app: server.Server) -> None:
 #---------------------------------------------------------------------
 
 def test_status_shape(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
-    stub_host(app)
+    stub_host(app, mem_uri='/rt/m')
     monkeypatch.setattr(server.relay, 'remote_sessions', lambda master, timeout=30: [{'session_id': 'a'}, {'session_id': 'b'}])
     app.runtime.update_state(lambda saved: saved['hosts'].update(node2={'host': 'n2', 'status': 'reconnecting', 'error': 'timed out'}))
     app.runtime.update_state(lambda saved: saved.update(redirect='gpu'))
@@ -263,14 +292,18 @@ def test_status_shape(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> No
                                     'host   state         files    memory   sessions',
                                     'gpu    connected     mounted  mounted  2',
                                     'node2  reconnecting  -        -        -']
+    assert blocks(text)[0] == 'mounts of gpu'
+    assert '--- mounts of gpu ---\nfiles: /p -> /rt/gpu/fs\nmemory: /rt/m -> /rt/gpu/mem\n' in text
+    assert max(len(line) for line in text.split('\n')[1:5]) < 80
     assert re.search(r'^messaging: on\nsession: sid-0001\nruntime: ', text, re.MULTILINE)
-    assert blocks(text) == ['error from node2 (data)'] and text.endswith('> timed out')
+    assert blocks(text) == ['mounts of gpu', 'error from node2 (data)'] and text.endswith('> timed out')
 
 
 def test_status_without_hosts(app: server.Server, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server.platform, 'missing', lambda tools: ['sshfs'])
     text, _ = app.call_tool('remote_status', {})
     assert text.split('\n')[0] == 'status · 0 hosts · redirect off'
+    assert 'next: remote_connect("<alias>") with the ssh host and project path' in text
     assert blocks(text) == ['missing tools']
 
 

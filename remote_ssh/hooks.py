@@ -120,10 +120,12 @@ def on_session_start(payload: dict[str, Any]) -> dict[str, Any] | None:
     state.write_json_atomic(runtime.dir / 'autoconnect.json', autoconnect)
     repo_config = [name for name in REPO_CONFIG_FILES if (Path(cwd) / '.claude' / name).exists()]
     note_shared = bool(repo_config) and owner.get('shared_config_noted') != session_id
+    #--- compact keeps the session id, so the name the server took over from an earlier session stays ---
+    name = owner.get('name') if owner.get('session_id') == session_id and owner.get('name') else relay.session_name(cwd, session_id)
     runtime.update_owner(
         session_id=session_id,
         cwd=cwd,
-        name=relay.session_name(cwd, session_id),
+        name=name,
         claude_pid=runtime.claude.pid,
         claude_proc_start=runtime.claude.start,
         hostname=socket.gethostname(),
@@ -336,7 +338,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     Claude Code matches permission rules against the rewritten ssh command, so the user's Bash
     deny rules would never match the original. The hook therefore checks them against the
     original command and denies on a match, and it shows the original command in the approval
-    prompt.
+    prompt. The remote command first prints `[<alias>]` on its own line, so a redirected result
+    shows which host ran it, and the command's exit code passes through unchanged.
     """
     if payload.get('tool_name') != 'Bash':
         return None
@@ -378,7 +381,8 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
             ('command', command[:REASON_COMMAND_CHARS])))
     try:
         extra = saved['ssh_opts'] if 'ssh_opts' in saved else shlex.split(os.environ.get('REMOTE_SSH_SSH_OPTS', ''))
-        argv = exec_argv(runtime.ctl_path(target), entry['host'], command, entry.get('path'), extra=extra or None,
+        marked = f"{{ printf '[%s]\\n' {shlex.quote(target)}\n{command}\n}}"
+        argv = exec_argv(runtime.ctl_path(target), entry['host'], marked, entry.get('path'), extra=extra or None,
                          remote_timeout=bash_timeout_s(tool_input))
     except Exception as exc:
         sys.stderr.write(f'remote-ssh: {exc!r}\n')
@@ -390,13 +394,40 @@ def on_pre_tool_use(payload: dict[str, Any]) -> dict[str, Any] | None:
     return build_output('PreToolUse', permissionDecision='ask', permissionDecisionReason=f'redirect {target} · runs on {target}\ncommand: {shown}', updatedInput=updated_input)
 
 
+def record_session(runtime: Any, payload: dict[str, Any]) -> None:
+    """Write the session id of a hook payload into owner.json while the server waits for one.
+
+    `/reload-plugins` starts a new server without firing SessionStart, so the server asks for the
+    id with the `need-session` flag. The first message hook that carries an id answers it, and the
+    server registers the session on its next tick. Does nothing without the flag.
+
+    Args:
+        runtime: Runtime directory of the owning Claude process.
+        payload: Hook stdin JSON, whose `session_id` and `cwd` are recorded.
+    """
+    if not runtime.need_session_path.exists():
+        return
+    import socket
+
+    from remote_ssh import relay
+
+    session_id, cwd = payload.get('session_id'), payload.get('cwd') or os.getcwd()
+    if session_id and not runtime.owner().get('session_id'):
+        runtime.update_owner(session_id=session_id, cwd=cwd, name=relay.session_name(cwd, session_id), claude_pid=runtime.claude.pid,
+                             claude_proc_start=runtime.claude.start, hostname=socket.gethostname())
+    if runtime.owner().get('session_id'):
+        runtime.need_session_path.unlink(missing_ok=True)
+
+
 def on_message_check(payload: dict[str, Any], event: str) -> dict[str, Any] | None:
     """Inject queued host context blocks and undelivered messages (UserPromptSubmit, PostToolUse)."""
     from remote_ssh import inbox, relay, state
 
     runtime = state.Runtime.current()
-    blocks = runtime.claim_context() if runtime is not None else []
     session_id = payload.get('session_id')
+    if runtime is not None:
+        record_session(runtime, payload)
+    blocks = runtime.claim_context() if runtime is not None else []
     store = relay.Store()
     text = inbox.render_claimed(store, session_id) if session_id else ''
     if text:

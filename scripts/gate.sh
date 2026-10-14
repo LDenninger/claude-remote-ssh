@@ -16,7 +16,7 @@ fi
 case $e in
   base) printf '%s\n' "$b"; exit 0 ;;
   PreToolUse) set -- "$b"/*/redirect-on ;;
-  *) set -- "$b"/*/pending "$b"/*/context/*.md ;;
+  *) set -- "$b"/*/pending "$b"/*/need-session "$b"/*/context/*.md ;;
 esac
 for f do
   [ -e "$f" ] && exec python3 -S "$r/scripts/hook.py" "$e"

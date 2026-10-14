@@ -164,10 +164,15 @@ def write_json_atomic(path: Path, obj: Any) -> None:
 
 def write_text_atomic(path: Path, text: str) -> None:
     """Write `text` to `path` with mode 0600, so readers see the old or the new file only."""
+    write_bytes_atomic(path, text.encode('utf-8'))
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    """Write `data` to `path` with mode 0600, so readers see the old or the new file only."""
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as tmp_file:
-            tmp_file.write(text)
+        with os.fdopen(fd, 'wb') as tmp_file:
+            tmp_file.write(data)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
         os.replace(tmp_name, path)
@@ -268,6 +273,16 @@ class Runtime:
         shell and start Python only when it exists.
         """
         return self.dir / 'pending'
+
+    @property
+    def need_session_path(self) -> Path:
+        """Path of the file that exists while the server has no session id.
+
+        `/reload-plugins` starts a new server without firing SessionStart, so the id never reaches
+        owner.json. The message hook commands treat this flag like pending work, and the next
+        UserPromptSubmit or PostToolUse hook writes the id from its payload and removes the flag.
+        """
+        return self.dir / 'need-session'
 
     @property
     def context_dir(self) -> Path:

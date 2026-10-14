@@ -31,6 +31,14 @@ MAX_READ_KEPT = 200
 MAX_PULL_MESSAGES = 100
 MAX_PULL_BYTES = 1024 * 1024
 FIELD_CAP = 64
+MAX_ATTACH_BYTES = 5 * 1024 * 1024
+MAX_ATTACH_FILES = 10
+ATTACH_TIMEOUT_S = 120
+MAX_SENT_KEPT = 100
+SSH_ERROR_EXIT = 255
+MAX_PREVIOUS_IDS = 20
+ENDED_MAX_AGE_S = 7 * 86400
+NAME_RE = re.compile(r'^[A-Za-z0-9._-]{1,100}$')
 
 
 #---------------------------------------------------------------------
@@ -83,11 +91,11 @@ def session_name(cwd: str, sid: str) -> str:
 
 
 def resolve(sessions: list[dict], name_or_id: str) -> dict | None:
-    """Find a session by exact id, exact name, or unique id prefix.
+    """Find a session by exact id, exact name, an id it replaced, or unique id prefix.
 
     Args:
-        sessions: Session entries, each with ``session_id`` and ``name``.
-        name_or_id: The id, the name or a prefix of the id.
+        sessions: Session entries, each with ``session_id``, ``name`` and optionally ``previous_ids``.
+        name_or_id: The id, the name, an earlier id of a resumed session or a prefix of the id.
 
     Returns:
         The matching entry, or None when nothing matches or the prefix is ambiguous.
@@ -98,6 +106,9 @@ def resolve(sessions: list[dict], name_or_id: str) -> dict | None:
                 return entry
     if not name_or_id:
         return None
+    for entry in sessions:
+        if name_or_id in (entry.get('previous_ids') or []):
+            return entry
     matches = [entry for entry in sessions if str(entry.get('session_id', '')).startswith(name_or_id)]
     return matches[0] if len(matches) == 1 else None
 
@@ -107,6 +118,45 @@ def _check_id(value: str) -> str:
     if not isinstance(value, str) or not ID_RE.match(value):
         raise ValueError(f'unsafe id: {value!r}')
     return value
+
+
+def check_attachments(paths: Any, base_dir: str = '') -> list[tuple[Path, str]]:
+    """Validate files to attach and choose the name each is stored under.
+
+    A stored name is the file's base name reduced to ``A-Za-z0-9._-`` without a leading dot, so no
+    path component of the source reaches the recipient's disk. Equal names get a numeric prefix.
+
+    Args:
+        paths: The ``files`` argument, expected to be a list of path strings.
+        base_dir: Directory a relative path is taken from.
+
+    Returns:
+        ``(source, stored name)`` pairs in the order given.
+
+    Raises:
+        ValueError: A path is not a string, does not exist, is not a regular file, there are more
+            than ``MAX_ATTACH_FILES`` files, or they total more than ``MAX_ATTACH_BYTES``.
+    """
+    if not isinstance(paths, list) or not all(isinstance(path, str) and path for path in paths):
+        raise ValueError('files must be a list of paths')
+    if len(paths) > MAX_ATTACH_FILES:
+        raise ValueError(f'{len(paths)} files, the limit is {MAX_ATTACH_FILES}')
+    files, total, used = [], 0, set()
+    for raw in paths:
+        source = Path(base_dir, os.path.expanduser(raw)).resolve()
+        if not source.exists():
+            raise ValueError(f'{raw} does not exist')
+        if not source.is_file():
+            raise ValueError(f'{raw} is not a regular file')
+        total += source.stat().st_size
+        name = re.sub(r'[^A-Za-z0-9._-]', '_', source.name).lstrip('.')[:80] or 'file'
+        while name in used:
+            name = f'{len(used)}-{name}'
+        used.add(name)
+        files.append((source, name))
+    if total > MAX_ATTACH_BYTES:
+        raise ValueError(f'the files total {total} bytes, the limit is {MAX_ATTACH_BYTES}')
+    return files
 
 
 #---------------------------------------------------------------------
@@ -134,12 +184,64 @@ class Store:
         return path
 
     def register(self, sid: str, entry: dict) -> None:
-        """Write the session entry ``sessions/<sid>.json``, adding ``session_id``."""
+        """Write the session entry ``sessions/<sid>.json``, adding ``session_id``, and drop its retired copy."""
         state.write_json_atomic(self.__ensure_dir('sessions') / f'{_check_id(sid)}.json', {**entry, 'session_id': sid})
+        (self.base / 'ended' / f'{sid}.json').unlink(missing_ok=True)
 
-    def unregister(self, sid: str) -> None:
-        """Remove the session entry of ``sid`` if present."""
-        (self.base / 'sessions' / f'{_check_id(sid)}.json').unlink(missing_ok=True)
+    def unregister(self, sid: str, retire: bool = True) -> None:
+        """Remove the session entry of ``sid`` if present.
+
+        Args:
+            sid: Session id.
+            retire: Keep the entry under ``ended/`` so a later session in the same directory can
+                take over its name with ``take_over``. Entries relayed from another machine are
+                never kept.
+        """
+        path = self.base / 'sessions' / f'{_check_id(sid)}.json'
+        entry = state.read_json(path)
+        if retire and isinstance(entry, dict) and not entry.get('relay_via'):
+            state.write_json_atomic(self.__ensure_dir('ended') / path.name, {**entry, 'ended_at': time.time()})
+        path.unlink(missing_ok=True)
+
+    def take_over(self, cwd: str, sid: str) -> dict | None:
+        """Claim the name of the newest ended session of this machine that ran in ``cwd``.
+
+        A candidate is a retired entry or a registered one whose process is dead, so a resumed or
+        cleared session keeps the name its predecessor had. Each candidate is claimed once.
+
+        Args:
+            cwd: Working directory of the registering session.
+            sid: Session id of the registering session, which never takes over its own entry.
+
+        Returns:
+            ``name`` and ``previous_ids`` (the claimed ids, the claimed session's own last) for the
+            new registration, or None when no session ended in ``cwd``.
+        """
+        hostname = socket.gethostname()
+        ended_dir = self.base / 'ended'
+        found = [(entry.get('ended_at', 0), entry, True) for entry in
+                 (state.read_json(path) for path in sorted(ended_dir.glob('*.json')))]
+        found += [(0, entry, False) for entry in self.sessions() if not is_pid_alive(entry.get('pid')) and not entry.get('relay_via')]
+        candidates = [(moment, entry, retired) for moment, entry, retired in found
+                      if isinstance(entry, dict) and entry.get('cwd') == cwd and entry.get('host') == hostname
+                      and entry.get('session_id') != sid and ID_RE.match(str(entry.get('session_id')))]
+        for _, entry, retired in sorted(candidates, key=lambda item: (item[0], str(item[1].get('started', ''))), reverse=True):
+            old = entry['session_id']
+            try:
+                if retired:
+                    (ended_dir / f'{old}.json').unlink()
+                else:
+                    self.unregister(old, retire=False)
+            except FileNotFoundError:
+                continue
+            return {'name': entry.get('name'), 'previous_ids': [*(entry.get('previous_ids') or [])[-MAX_PREVIOUS_IDS:], old]}
+        return None
+
+    def move_inbox(self, old_sid: str, new_sid: str) -> None:
+        """Move the unread messages of ``old_sid`` into the inbox of ``new_sid``, addressed to it."""
+        for msg in self.pending(old_sid):
+            self.deliver({**msg, 'to_session': new_sid})
+            (self.base / 'inbox' / old_sid / f'{msg["id"]}.json').unlink(missing_ok=True)
 
     def sessions(self) -> list[dict]:
         """Return every registered session entry, skipping unreadable files."""
@@ -230,6 +332,67 @@ class Store:
         """Return the message files waiting in the outbox of ``sid``, sorted by id."""
         return self.__list_msg_files(self.base / 'outbox' / _check_id(sid))
 
+    def log_sent(self, msg: dict, to_name: str, alias: str | None, route: str) -> None:
+        """Record a sent message in ``sent/`` so ``remote_inbox`` can report its delivery state.
+
+        Args:
+            msg: The message that was sent.
+            to_name: Display name of the recipient.
+            alias: Host alias the message went through, None for a session on this machine.
+            route: ``"inbox"`` or ``"outbox"``, where the message was written.
+        """
+        sent_dir = self.__ensure_dir('sent')
+        body = clean_text(msg.get('body', ''), 48)
+        state.write_json_atomic(sent_dir / f'{_check_id(msg["id"])}.json', {
+            'id': msg['id'], 'from_session': msg['from_session'], 'to_session': msg['to_session'], 'to_name': to_name,
+            'alias': alias, 'route': route, 'sent_at': msg['sent_at'], 'preview': body})
+        for old_path in self.__list_msg_files(sent_dir)[:-MAX_SENT_KEPT]:
+            old_path.unlink(missing_ok=True)
+
+    def sent_log(self, from_sid: str, limit: int = 10) -> list[dict]:
+        """Return the ``limit`` most recent messages ``from_sid`` sent, oldest first."""
+        entries = [state.read_json(path) for path in self.__list_msg_files(self.base / 'sent')]
+        return [entry for entry in entries if isinstance(entry, dict) and entry.get('from_session') == from_sid][-limit:]
+
+    def local_receipt(self, entry: dict) -> str:
+        """Return where a message logged by ``log_sent`` stands on this machine.
+
+        Returns:
+            ``"waiting"`` (unread in the recipient's inbox or not yet pulled from the outbox),
+            ``"read"`` (moved to the recipient's ``read/``), ``"delivered"`` (left the outbox, so
+            another machine pulled it) or ``"unknown"`` (the message is nowhere, for instance
+            after the recipient's directory was swept).
+        """
+        file_name = f'{_check_id(entry["id"])}.json'
+        if entry.get('route') == 'outbox':
+            return 'waiting' if (self.base / 'outbox' / _check_id(entry['to_session']) / file_name).exists() else 'delivered'
+        current = resolve(self.sessions(), entry['to_session'])
+        for sid in dict.fromkeys([entry['to_session'], current['session_id'] if current else entry['to_session']]):
+            if (self.base / 'inbox' / _check_id(sid) / file_name).exists():
+                return 'waiting'
+            if (self.base / 'inbox' / _check_id(sid) / 'read' / file_name).exists():
+                return 'read'
+        return 'unknown'
+
+    def attach(self, msg_id: str, files: list[tuple[str, bytes]], box: str = 'attachments') -> list[str]:
+        """Write files into ``<box>/<msg_id>/`` of this store.
+
+        Args:
+            msg_id: Id of the message the files belong to.
+            files: ``(stored name, content)`` pairs, the names from ``check_attachments``.
+            box: ``"attachments"`` for a recipient on this machine, ``"outbox/<sid>/attachments"``
+                for one that pulls from this machine's outbox.
+
+        Returns:
+            The absolute paths of the copies.
+        """
+        target = self.__ensure_dir(*(_check_id(part) for part in box.split('/')), _check_id(msg_id))
+        paths = []
+        for name, content in files:
+            state.write_bytes_atomic(target / name, content)
+            paths.append(str(target / name))
+        return paths
+
     def sweep(self, live_sids: set[str], max_age_s: float = 7 * 86400) -> None:
         """Drop registrations of dead sessions of this node and stale message directories.
 
@@ -246,7 +409,7 @@ class Store:
             sid = entry.get('session_id')
             if sid in live_sids or entry.get('relay_via') or entry.get('host') != hostname or not ID_RE.match(str(sid)):
                 continue
-            if not _is_pid_alive(entry.get('pid')):
+            if not is_pid_alive(entry.get('pid')):
                 self.unregister(sid)
         registered = {entry.get('session_id') for entry in self.sessions()} | set(live_sids)
         cutoff = time.time() - max_age_s
@@ -257,9 +420,15 @@ class Store:
             for msg_dir in kind_dir.iterdir():
                 if msg_dir.name not in registered and msg_dir.is_dir() and msg_dir.stat().st_mtime < cutoff:
                     shutil.rmtree(msg_dir, ignore_errors=True)
+        for stale in [*(self.base / 'ended').glob('*.json'), *(self.base / 'attachments').glob('*')]:
+            if stale.stat().st_mtime < cutoff:
+                if stale.is_dir():
+                    shutil.rmtree(stale, ignore_errors=True)
+                else:
+                    stale.unlink(missing_ok=True)
 
 
-def _is_pid_alive(pid: Any) -> bool:
+def is_pid_alive(pid: Any) -> bool:
     """Return whether ``pid`` names a running process. A missing or invalid pid counts as alive."""
     if not isinstance(pid, int) or pid <= 0:
         return True
@@ -358,6 +527,53 @@ def remote_deliver(master: Any, msg: dict, box: str = 'inbox') -> None:
     _run(master, _build_write_cmd(box_expr, f'{_check_id(msg["id"])}.json'), input=json.dumps(msg).encode())
 
 
+def remote_attach(master: Any, msg_id: str, files: list[tuple[Path, str]], to_sid: str | None = None) -> list[str]:
+    """Copy files to ``attachments/<msg_id>/`` on the remote, or into the outbox area of ``to_sid``.
+
+    Args:
+        master: Connection to the remote.
+        msg_id: Id of the message the files belong to.
+        files: ``(source, stored name)`` pairs from ``check_attachments``.
+        to_sid: Recipient that pulls from the remote's outbox. None for a recipient on the remote.
+
+    Returns:
+        The absolute paths of the copies on the remote, in order.
+    """
+    area = f'outbox/{shlex.quote(_check_id(to_sid))}/attachments' if to_sid else 'attachments'
+    dir_expr = f'{_get_remote_base()}/{area}/{shlex.quote(_check_id(msg_id))}'
+    paths = []
+    for source, name in files:
+        command = _build_write_cmd(dir_expr, name) + f' && cd "$d" && printf "%s/%s" "$(pwd -P)" {shlex.quote(name)}'
+        paths.append(_run(master, command, input=source.read_bytes(), timeout=ATTACH_TIMEOUT_S).decode('utf-8', 'replace'))
+    return paths
+
+
+def remote_receipts(master: Any, entries: list[dict], timeout: float = 5) -> list[str]:
+    """Return the delivery state of logged messages on the remote, in one round trip.
+
+    Args:
+        master: Connection to the remote.
+        entries: Records from ``Store.sent_log`` whose recipients live on the remote.
+        timeout: Seconds the round trip may take.
+
+    Returns:
+        One of ``"waiting"``, ``"read"``, ``"delivered"`` or ``"unknown"`` per entry, as
+        ``Store.local_receipt`` defines them.
+    """
+    if not entries:
+        return []
+    base, checks = _get_remote_base(), []
+    for entry in entries:
+        file_name, to_sid = shlex.quote(f'{_check_id(entry["id"])}.json'), shlex.quote(_check_id(entry['to_session']))
+        if entry.get('route') == 'outbox':
+            checks.append(f'if [ -e "$b"/outbox/{to_sid}/{file_name} ]; then printf w; else printf d; fi')
+        else:
+            checks.append(f'if [ -e "$b"/inbox/{to_sid}/{file_name} ]; then printf w; elif [ -e "$b"/inbox/{to_sid}/read/{file_name} ]; then printf r; else printf u; fi')
+    letters = _run(master, f'b={base}; ' + '; '.join(checks), timeout=timeout).decode()
+    states = {'w': 'waiting', 'r': 'read', 'd': 'delivered', 'u': 'unknown'}
+    return [states.get(letter, 'unknown') for letter in letters.ljust(len(entries), 'u')]
+
+
 def remote_send(master: Any, msg: dict, target: dict) -> str:
     """Place a message for a session registered on the remote, mirroring ``Store.send``.
 
@@ -413,18 +629,62 @@ def pull_outbox(master: Any, sid: str, store: Store, timeout: float = REMOTE_TIM
         file_name = file_name_raw.decode('utf-8', 'replace')
         if not MSG_FILE_RE.match(file_name):
             continue
-        done.append(file_name)
         try:
             msg = json.loads(content)
         except ValueError:
+            done.append(file_name)
             continue
         if not isinstance(msg, dict) or msg.get('to_session') != sid or f'{msg.get("id")}.json' != file_name:
+            done.append(file_name)
             continue
+        names = msg.pop('attachment_names', None)
+        msg.pop('attachments', None)
+        if names:
+            try:
+                msg['attachments'] = _pull_attachments(master, outbox_expr, msg['id'], names, store)
+            except RemoteCommandError as error:
+                if error.returncode == SSH_ERROR_EXIT:
+                    raise
+                continue
+        done.append(file_name)
         store.deliver({**msg, 'relayed_from': master.alias})
         delivered += 1
     if done:
-        _run(master, f'cd {outbox_expr} && rm -f -- {" ".join(shlex.quote(name) for name in done)}', timeout=timeout)
+        dirs = [shlex.quote(f'attachments/{name[:-5]}') for name in done]
+        _run(master, f'cd {outbox_expr} && rm -f -- {" ".join(shlex.quote(name) for name in done)}; rm -rf -- {" ".join(dirs)}', timeout=timeout)
     return delivered
+
+
+def _pull_attachments(master: Any, outbox_expr: str, msg_id: str, names: Any, store: Store) -> list[str]:
+    """Fetch the attachments of one outbox message into the local store and return their paths.
+
+    Args:
+        master: Connection to the remote.
+        outbox_expr: Shell word of the recipient's remote outbox directory.
+        msg_id: Id of the message.
+        names: Stored file names the sender listed. Names outside ``NAME_RE`` are ignored.
+        store: Local store receiving the files.
+
+    Returns:
+        The absolute local paths. Files the remote does not hold, and files beyond
+        ``MAX_ATTACH_BYTES`` in total, are skipped.
+    """
+    wanted = [name for name in names if isinstance(name, str) and NAME_RE.match(name)][:MAX_ATTACH_FILES] if isinstance(names, list) else []
+    if not wanted:
+        return []
+    command = (f'cd {outbox_expr}/attachments/{shlex.quote(_check_id(msg_id))} 2>/dev/null || exit 0; '
+               f'for f in {" ".join(shlex.quote(name) for name in wanted)}; do [ -f "$f" ] || continue; '
+               'printf "%s\\0%s\\0" "$f" "$(wc -c < "$f")"; cat -- "$f"; done')
+    data, pos, total, files = _run(master, command, timeout=ATTACH_TIMEOUT_S), 0, 0, []
+    while pos < len(data):
+        name_end = data.index(b'\0', pos)
+        size_end = data.index(b'\0', name_end + 1)
+        name, size = data[pos:name_end].decode('utf-8', 'replace'), int(data[name_end + 1:size_end])
+        pos = size_end + 1 + size
+        total += size
+        if name in wanted and total <= MAX_ATTACH_BYTES:
+            files.append((name, data[size_end + 1:pos]))
+    return store.attach(msg_id, files)
 
 
 def remote_cleanup(master: Any, machine: str, live_sids: set[str]) -> None:
